@@ -1,9 +1,8 @@
 """Investment Bot — Telegram UI.
 
-Главное меню: 📊 Инвестиции | 🔄 Круги
+Главное меню: 📊 Инвестиции | 🔄 Круги | 📜 История
 """
 
-import json
 import logging
 
 from telegram import (Update, InlineKeyboardButton,
@@ -32,111 +31,22 @@ def _main_kb() -> InlineKeyboardMarkup:
                               callback_data="sec:invest"),
          InlineKeyboardButton("🔄 Круги",
                               callback_data="sec:circles")],
+        [InlineKeyboardButton("📜 История",
+                              callback_data="sec:history")],
     ])
-
-
-# ============================================================
-# /start
-# ============================================================
-async def cmd_start(update: Update,
-                    ctx: ContextTypes.DEFAULT_TYPE):
-    if not _auth(update):
-        return
-    accs = db.get_accounts()
-    circles = [a for a in accs if a["status"] in ("buy", "hold")]
-    await update.message.reply_text(
-        f"📊 <b>Investment Bot</b>\n\n"
-        f"Аккаунтов: {len(accs)}\n"
-        f"Активных кругов: {len(circles)}",
-        parse_mode="HTML", reply_markup=_main_kb())
-
-
-# ============================================================
-# Инвестиции
-# ============================================================
-def _invest_text() -> str:
-    """Таблица инвестиций: аккаунты + инвентари."""
-    accs = db.get_accounts()
-    if not accs:
-        return "📊 <b>Инвестиции</b>\n\nНет аккаунтов."
-
-    lines = ["📊 <b>Инвестиции</b>\n"]
-    total_val = 0.0
-
-    for acc in accs:
-        inv_parts = []
-        for app_id, game in [(730, "CS2"), (570, "Dota2")]:
-            inv = db.get_inventory(acc["id"], app_id)
-            if inv and inv["items_count"] > 0:
-                inv_parts.append(
-                    f"{game}: {inv['items_count']} "
-                    f"(${inv['total_value']:.2f})")
-                total_val += inv["total_value"]
-
-        inv_line = " | ".join(inv_parts) if inv_parts else "—"
-        lines.append(
-            f"<b>{acc['login']}</b>\n"
-            f"  📦 {inv_line}")
-
-    lines.append(f"\n💰 Итого: ${total_val:.2f}")
-    return "\n".join(lines)
 
 
 def _invest_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Добавить аккаунт",
+        [InlineKeyboardButton("➕ Добавить",
                               callback_data="inv:add"),
          InlineKeyboardButton("🗑 Удалить",
                               callback_data="inv:del_pick")],
-        [InlineKeyboardButton("🔄 Обновить инвентари",
+        [InlineKeyboardButton("🔄 Обновить",
                               callback_data="inv:refresh")],
         [InlineKeyboardButton("🔙 Назад",
                               callback_data="back")],
     ])
-
-
-# ============================================================
-# Круги
-# ============================================================
-def _circles_text() -> str:
-    """Текст активных кругов."""
-    accs = db.get_accounts()
-    active = [a for a in accs if a["status"] in ("buy", "hold", "sale")]
-    if not active:
-        return "🔄 <b>Круги</b>\n\nНет активных кругов."
-
-    lines = ["🔄 <b>Круги</b>\n"]
-    total_amount = 0.0
-
-    for acc in active:
-        emoji = STATUS_EMOJI.get(acc["status"], "⚪")
-        inv_parts = []
-        for app_id, game in [(730, "CS2"), (570, "Dota2")]:
-            inv = db.get_inventory(acc["id"], app_id)
-            if inv and inv["items_count"] > 0:
-                inv_parts.append(
-                    f"{game}: {inv['items_count']} "
-                    f"(${inv['total_value']:.2f})")
-        inv_line = " | ".join(inv_parts) if inv_parts else "—"
-
-        try:
-            amt = float(acc["amount"].replace("$", "")
-                        .split("+")[0].strip())
-            total_amount += amt
-        except (ValueError, IndexError):
-            pass
-
-        block = [f"<b>{acc['login']}</b> | {acc['amount']}"]
-        block.append(f"  📦 {inv_line}")
-        if acc["scheme"]:
-            block.append(f"  🔄 {acc['scheme']}")
-        if acc["check_note"]:
-            block.append(f"  📋 {acc['check_note']}")
-        block.append(f"  {emoji} {acc['status']}")
-        lines.append("\n".join(block))
-
-    lines.append(f"\n💰 Вложено: ${total_amount:.0f}")
-    return "\n\n".join(lines)
 
 
 def _circles_kb() -> InlineKeyboardMarkup:
@@ -153,6 +63,25 @@ def _circles_kb() -> InlineKeyboardMarkup:
 
 
 # ============================================================
+# /start
+# ============================================================
+async def cmd_start(update: Update,
+                    ctx: ContextTypes.DEFAULT_TYPE):
+    if not _auth(update):
+        return
+    accs = db.get_accounts()
+    active = len([a for a in accs
+                  if a["status"] in ("buy", "hold")])
+    done = len([a for a in accs if a["status"] == "done"])
+    await update.message.reply_text(
+        f"📊 <b>Investment Bot</b>\n\n"
+        f"Аккаунтов: {len(accs)}\n"
+        f"Активных кругов: {active}\n"
+        f"Завершённых: {done}",
+        parse_mode="HTML", reply_markup=_main_kb())
+
+
+# ============================================================
 # Callback dispatch
 # ============================================================
 async def on_callback(update: Update,
@@ -164,28 +93,37 @@ async def on_callback(update: Update,
     await q.answer()
     data = q.data
 
-    # === Главное меню ===
+    # --- Главное меню ---
     if data == "sec:invest":
         await q.message.edit_text(
-            _invest_text(), parse_mode="HTML",
+            dashboard.invest_text(), parse_mode="HTML",
             reply_markup=_invest_kb())
 
     elif data == "sec:circles":
         await q.message.edit_text(
-            _circles_text(), parse_mode="HTML",
+            dashboard.circles_text(), parse_mode="HTML",
             reply_markup=_circles_kb())
+
+    elif data == "sec:history":
+        await q.message.edit_text(
+            dashboard.history_text(), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад",
+                                     callback_data="back")]]))
 
     elif data == "back":
         accs = db.get_accounts()
-        circles = [a for a in accs
-                   if a["status"] in ("buy", "hold")]
+        active = len([a for a in accs
+                      if a["status"] in ("buy", "hold")])
+        done = len([a for a in accs if a["status"] == "done"])
         await q.message.edit_text(
             f"📊 <b>Investment Bot</b>\n\n"
             f"Аккаунтов: {len(accs)}\n"
-            f"Активных кругов: {len(circles)}",
+            f"Активных кругов: {active}\n"
+            f"Завершённых: {done}",
             parse_mode="HTML", reply_markup=_main_kb())
 
-    # === Инвестиции: добавить ===
+    # --- Инвестиции ---
     elif data == "inv:add":
         ctx.user_data["flow"] = "inv_add"
         ctx.user_data["step"] = "login"
@@ -199,8 +137,7 @@ async def on_callback(update: Update,
         rows.append([InlineKeyboardButton(
             "🔙", callback_data="sec:invest")])
         await q.message.edit_text(
-            "Выбери аккаунт для удаления:",
-            reply_markup=InlineKeyboardMarkup(rows))
+            "Удалить:", reply_markup=InlineKeyboardMarkup(rows))
 
     elif data.startswith("inv:del:"):
         acc_id = int(data.split(":")[2])
@@ -212,24 +149,20 @@ async def on_callback(update: Update,
             reply_markup=_main_kb())
 
     elif data == "inv:refresh":
-        await q.message.edit_text("🔄 Обновляю...")
+        await q.message.edit_text("🔄 Обновление запущено...")
         import threading
         def _do():
-            import daemon
-            daemon.run_update()
+            import daemon; daemon.run_update()
         threading.Thread(target=_do, daemon=True).start()
-        await q.message.edit_text(
-            "🔄 Обновление запущено (фон)",
-            reply_markup=_invest_kb())
 
-    # === Круги: добавить ===
+    # --- Круги: добавить ---
     elif data == "cir:add":
         ctx.user_data["flow"] = "cir_add"
         ctx.user_data["step"] = "login"
         await q.message.edit_text(
             "Введи логин аккаунта для нового круга:")
 
-    # === Круги: завершить ===
+    # --- Круги: завершить ---
     elif data == "cir:finish_pick":
         accs = db.get_accounts()
         active = [a for a in accs
@@ -246,8 +179,7 @@ async def on_callback(update: Update,
         rows.append([InlineKeyboardButton(
             "🔙", callback_data="sec:circles")])
         await q.message.edit_text(
-            "Выбери круг для завершения:",
-            reply_markup=InlineKeyboardMarkup(rows))
+            "Выбери круг:", reply_markup=InlineKeyboardMarkup(rows))
 
     elif data.startswith("cir:fin:"):
         acc_id = int(data.split(":")[2])
@@ -255,12 +187,12 @@ async def on_callback(update: Update,
         ctx.user_data["finish_acc"] = acc_id
         acc = db.get_account(acc_id)
         await q.message.edit_text(
-            f"✅ Завершение круга: <b>{acc['login']}</b>\n"
+            f"✅ <b>{acc['login']}</b>\n"
             f"Вложено: {acc['amount']}\n\n"
-            f"Введи сумму вывода (сколько получил, в $):",
+            f"Введи сумму вывода ($):",
             parse_mode="HTML")
 
-    # === Круги: изменить ===
+    # --- Круги: изменить ---
     elif data == "cir:edit_pick":
         accs = db.get_accounts()
         rows = [[InlineKeyboardButton(
@@ -269,13 +201,14 @@ async def on_callback(update: Update,
         rows.append([InlineKeyboardButton(
             "🔙", callback_data="sec:circles")])
         await q.message.edit_text(
-            "Выбери аккаунт:", reply_markup=InlineKeyboardMarkup(rows))
+            "Выбери:", reply_markup=InlineKeyboardMarkup(rows))
 
     elif data.startswith("cir:edit:"):
         acc_id = int(data.split(":")[2])
         acc = db.get_account(acc_id)
         if not acc:
             return
+        emoji = STATUS_EMOJI.get(acc["status"], "⚪")
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("💰 Сумма",
                                   callback_data=f"ef:{acc_id}:amount"),
@@ -288,7 +221,6 @@ async def on_callback(update: Update,
             [InlineKeyboardButton("🔙",
                                   callback_data="sec:circles")],
         ])
-        emoji = STATUS_EMOJI.get(acc["status"], "⚪")
         await q.message.edit_text(
             f"✏️ <b>{acc['login']}</b>\n"
             f"💰 {acc['amount']} | {emoji} {acc['status']}\n"
@@ -304,10 +236,14 @@ async def on_callback(update: Update,
         ctx.user_data["edit_field"] = field
         if field == "status":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🟢 buy", callback_data="sv:buy"),
-                 InlineKeyboardButton("🟡 hold", callback_data="sv:hold")],
-                [InlineKeyboardButton("🟠 sale", callback_data="sv:sale"),
-                 InlineKeyboardButton("✅ done", callback_data="sv:done")],
+                [InlineKeyboardButton("🟢 buy",
+                                      callback_data="sv:buy"),
+                 InlineKeyboardButton("🟡 hold",
+                                      callback_data="sv:hold")],
+                [InlineKeyboardButton("🟠 sale",
+                                      callback_data="sv:sale"),
+                 InlineKeyboardButton("✅ done",
+                                      callback_data="sv:done")],
             ])
             await q.message.edit_text("Статус:", reply_markup=kb)
         else:
@@ -319,13 +255,12 @@ async def on_callback(update: Update,
     elif data.startswith("sv:"):
         value = data[3:]
         acc_id = ctx.user_data.get("edit_acc")
-        if acc_id:
-            db.update_account(acc_id, **{
-                ctx.user_data.get("edit_field", "status"): value})
-            dashboard.update_circles()
+        field = ctx.user_data.get("edit_field", "status")
         ctx.user_data.clear()
+        if acc_id:
+            db.update_account(acc_id, **{field: value})
         await q.message.edit_text(
-            f"✅ Обновлено", reply_markup=_main_kb())
+            "✅ Обновлено", reply_markup=_main_kb())
 
 
 # ============================================================
@@ -339,26 +274,22 @@ async def handle_text(update: Update,
     step = ctx.user_data.get("step")
     text = update.message.text.strip()
 
-    # === Инвестиции: добавить аккаунт ===
+    # --- Инвестиции: добавить ---
     if flow == "inv_add":
         if step == "login":
             ctx.user_data["add_login"] = text
             ctx.user_data["step"] = "steamid"
-            await update.message.reply_text(
-                "Введи SteamID (76561...):")
+            await update.message.reply_text("SteamID (76561...):")
         elif step == "steamid":
             login = ctx.user_data.pop("add_login", "")
-            steam_id = text
             ctx.user_data.clear()
-            if login and steam_id:
-                db.add_account(login, steam_id)
+            if login and text:
+                db.add_account(login, text)
                 await update.message.reply_text(
                     f"✅ Добавлен: {login}",
                     reply_markup=_main_kb())
-            else:
-                await update.message.reply_text("❌ Ошибка")
 
-    # === Круги: добавить ===
+    # --- Круги: добавить ---
     elif flow == "cir_add":
         if step == "login":
             ctx.user_data["add_login"] = text
@@ -371,8 +302,7 @@ async def handle_text(update: Update,
         elif step == "amount":
             ctx.user_data["add_amount"] = text
             ctx.user_data["step"] = "scheme"
-            await update.message.reply_text(
-                "Схема (напр. бафф -> стим -> тм):")
+            await update.message.reply_text("Схема:")
         elif step == "scheme":
             login = ctx.user_data.pop("add_login", "")
             steam_id = ctx.user_data.pop("add_steamid", "")
@@ -382,12 +312,11 @@ async def handle_text(update: Update,
             if login and steam_id:
                 db.add_account(login, steam_id,
                                amount=amount, scheme=scheme)
-                dashboard.update_circles()
                 await update.message.reply_text(
                     f"✅ Круг создан: {login} | {amount}",
                     reply_markup=_main_kb())
 
-    # === Круги: завершить ===
+    # --- Круги: завершить ---
     elif flow == "cir_finish":
         acc_id = ctx.user_data.get("finish_acc")
         ctx.user_data.clear()
@@ -402,7 +331,6 @@ async def handle_text(update: Update,
         except ValueError:
             await update.message.reply_text("❌ Введи число")
             return
-        # Считаем результат
         try:
             invested = float(acc["amount"].replace("$", "")
                              .split("+")[0].strip())
@@ -411,12 +339,10 @@ async def handle_text(update: Update,
         profit = withdrawn - invested
         roi = (profit / invested * 100) if invested > 0 else 0
         emoji = "📈" if profit >= 0 else "📉"
-
-        db.update_account(acc_id, status="done",
-                          check_note=f"Вывод: ${withdrawn:.2f}, "
-                                     f"P/L: ${profit:+.2f} "
-                                     f"({roi:+.1f}%)")
-        dashboard.update_circles()
+        db.update_account(
+            acc_id, status="done",
+            check_note=f"Вывод: ${withdrawn:.2f}, "
+                       f"P/L: ${profit:+.2f} ({roi:+.1f}%)")
         await update.message.reply_text(
             f"✅ <b>Круг завершён: {acc['login']}</b>\n\n"
             f"💰 Вложено: ${invested:.2f}\n"
@@ -424,14 +350,13 @@ async def handle_text(update: Update,
             f"{emoji} P/L: <b>${profit:+.2f}</b> ({roi:+.1f}%)",
             parse_mode="HTML", reply_markup=_main_kb())
 
-    # === Edit field ===
+    # --- Edit field ---
     elif flow == "edit":
         acc_id = ctx.user_data.get("edit_acc")
         field = ctx.user_data.get("edit_field")
         ctx.user_data.clear()
         if acc_id and field:
             db.update_account(acc_id, **{field: text})
-            dashboard.update_circles()
             await update.message.reply_text(
                 "✅ Обновлено", reply_markup=_main_kb())
 
