@@ -10,71 +10,93 @@ MSK = timezone(timedelta(hours=3))
 STATUS_EMOJI = {"buy": "🟢", "hold": "🟡", "sale": "🟠", "done": "✅"}
 
 
+def _aggregate_inventories() -> list:
+    """Собрать все предметы со всех аккаунтов из inventory_cache."""
+    import json
+    accs = db.get_accounts()
+    merged = {}  # name -> total count
+
+    for acc in accs:
+        for app_id in (730, 570):
+            inv = db.get_inventory(acc["id"], app_id)
+            if not inv or not inv.get("items_json"):
+                continue
+            try:
+                items = json.loads(inv["items_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for item in items:
+                name = item.get("name", "")
+                count = item.get("count", 0)
+                if name and count > 0:
+                    merged[name] = merged.get(name, 0) + count
+
+    # Получаем цены из lis-sniper
+    import pricing
+    names = list(merged.keys())
+    prices = pricing.get_price_batch(names, 730)
+    # Для Dota2 тоже
+    prices_dota = pricing.get_price_batch(names, 570)
+    for n, p in prices_dota.items():
+        if n not in prices:
+            prices[n] = p
+
+    result = []
+    for name, qty in sorted(merged.items(),
+                             key=lambda x: x[1], reverse=True):
+        price = prices.get(name, 0)
+        result.append({"name": name, "qty": qty,
+                        "price": price,
+                        "total": price * qty})
+    return result
+
+
 def invest_text() -> str:
-    """Текст раздела Инвестиции (CS2 таблица)."""
-    items = db.get_cs2_investments()
+    """Текст раздела Инвестиции — реальные предметы с аккаунтов."""
+    items = _aggregate_inventories()
     if not items:
-        return "📈 <b>Дашборд инвестиций CS2</b>\n\nНет данных."
+        return "📊 <b>Инвестиции</b>\n\nНет предметов на аккаунтах."
 
     now = datetime.now(MSK).strftime("%d.%m.%Y, %H:%M МСК")
-    total_qty = 0
-    total_buy = 0.0
-    total_steam = 0.0
-    total_mc = 0.0
+    total_qty = sum(i["qty"] for i in items)
+    total_val = sum(i["total"] for i in items)
+
+    # Топ-20 по стоимости
+    top = sorted(items, key=lambda x: x["total"], reverse=True)[:20]
 
     rows = []
-    for item in items:
-        qty = item["qty"]
-        bp = item["buy_price"]
-        sp = item["steam_price"]
-        mc = item["market_csgo_price"]
-        ps = item.get("prev_steam") or sp
-        pm = item.get("prev_mc") or mc
+    for item in top:
+        short = item["name"]
+        # Сокращаем длинные названия
+        for rm in (" (Factory New)", " (Minimal Wear)",
+                   " (Field-Tested)", " (Well-Worn)",
+                   " (Battle-Scarred)", "StatTrak™ ",
+                   "Souvenir ", "Sticker | "):
+            short = short.replace(rm, "")
+        if len(short) > 16:
+            short = short[:15] + "…"
 
-        # Δ%
-        ds = ((sp - ps) / ps * 100) if ps > 0 else 0
-        dm = ((mc - pm) / pm * 100) if pm > 0 else 0
-        ds_icon = "🟢" if ds > 10 else ("🔴" if ds < -5 else "")
-        dm_icon = "🟢" if dm > 10 else ("🔴" if dm < -5 else "")
-
-        # Сокращённое имя
-        short = (item["name"].replace(" Case", "")
-                 .replace("Desert Eagle | Tilted (Factory New)",
-                          "Deagle FN"))
-        if len(short) > 12:
-            short = short[:11] + "…"
-
-        q_s = f"{qty:>3}" if qty > 0 else "  —"
-        b_s = f"{bp:>4.2f}" if bp > 0 else "   —"
+        p = item["price"]
+        t = item["total"]
         rows.append(
-            f"{short:<12}│{q_s}│{bp:>5.2f}│{sp:>5.2f}│"
-            f"{ds:>+5.1f}%{ds_icon}│{mc:>5.2f}│"
-            f"{dm:>+5.1f}%{dm_icon}")
-
-        total_qty += qty
-        total_buy += bp * qty
-        total_steam += sp * qty
-        total_mc += mc * qty
-
-    net_steam = total_steam * 0.87
-    pnl = net_steam - total_buy
-    pnl_pct = (pnl / total_buy * 100) if total_buy > 0 else 0
-    pnl_emoji = "📈" if pnl >= 0 else "📉"
+            f"{short:<16}│{item['qty']:>4}│"
+            f"{'—' if p == 0 else f'${p:.2f}':>6}│"
+            f"{'—' if t == 0 else f'${t:.2f}':>8}")
 
     header = (
-        f"📈 <b>Дашборд инвестиций CS2</b>\n"
-        f"💰 Вложено: ${total_buy:.2f} ({total_qty} шт)\n"
-        f"💵 Сейчас: ${total_steam:.2f} / "
-        f"${total_mc:.2f}\n"
-        f"{pnl_emoji} PnL: ${pnl:+.2f} ({pnl_pct:+.1f}%)\n"
+        f"📊 <b>Инвестиции</b>\n"
+        f"📦 Предметов: {total_qty}\n"
+        f"💰 Оценка: ${total_val:.2f}\n"
         f"🕐 {now}\n")
 
-    hdr = (f"{'':12}│Qty│  Avg│  Stm│   ΔS│   TM│   ΔM")
-    sep = "─" * 12 + "┼" + "─" * 3 + "┼" + "─" * 5 + "┼" + \
-          "─" * 5 + "┼" + "─" * 7 + "┼" + "─" * 5 + "┼" + "─" * 7
+    hdr = f"{'Предмет':<16}│ Кол│ Цена │  Всего"
+    sep = "─" * 16 + "┼" + "─" * 4 + "┼" + "─" * 6 + "┼" + "─" * 8
     table = "\n".join([hdr, sep] + rows)
 
-    return f"{header}\n<pre>{table}</pre>"
+    priced = len([i for i in items if i["price"] > 0])
+    footer = f"\nОценено: {priced}/{len(items)} предметов"
+
+    return f"{header}\n<pre>{table}{footer}</pre>"
 
 
 def circles_text() -> str:
