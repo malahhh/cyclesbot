@@ -78,6 +78,18 @@ def _circle_card(acc: dict) -> str:
             total_value += inv["total_value"]
     cnt_s = str(items_count) if items_count else "??"
     val_s = f"${total_value:.2f}" if total_value > 0 else "??"
+    latest_upd = 0
+    for app_id in (730, 570):
+        inv = db.get_inventory(acc["steam_id"], app_id)
+        if inv and inv.get("updated_at", 0) > latest_upd:
+            latest_upd = inv["updated_at"]
+    if latest_upd:
+        from datetime import datetime, timezone, timedelta
+        _MSK = timezone(timedelta(hours=3))
+        next_dt = datetime.fromtimestamp(latest_upd + 24*3600, _MSK)
+        next_s = f"{next_dt.strftime('%d.%m')} ~{next_dt.strftime('%H:00')} МСК"
+    else:
+        next_s = "??"
     return (
         f"🟦 Круг #{acc['id']} — Аккаунт: <b>{acc['login']}</b>\n"
         f"💰 Вложено: {acc['amount'] or '??'}\n"
@@ -85,7 +97,8 @@ def _circle_card(acc: dict) -> str:
         f"💵 Оценка Steam: {val_s}\n"
         f"🔁 Схема: {acc['scheme'] or '??'}\n"
         f"⚠️ Статус схемы: {acc['check_note'] or '??'}\n"
-        f"📝 Примечание: {acc['status'] or '??'}")
+        f"📝 Примечание: {acc['status'] or '??'}\n"
+        f"🕐 След. обновление: {next_s}")
 
 
 def _circle_card_kb(acc_id: int) -> InlineKeyboardMarkup:

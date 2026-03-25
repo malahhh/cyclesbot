@@ -170,6 +170,19 @@ def circles_text() -> str:
         cnt_s = str(items_cnt) if items_cnt else "??"
         val_s = f"${steam_val:.2f}" if steam_val > 0 else "??"
 
+        # След. обновление
+        latest_upd = 0
+        for app_id in (730, 570):
+            inv = db.get_inventory(acc["steam_id"], app_id)
+            if inv and inv.get("updated_at", 0) > latest_upd:
+                latest_upd = inv["updated_at"]
+        if latest_upd:
+            next_dt = datetime.fromtimestamp(
+                latest_upd + 24 * 3600, MSK)
+            next_s = f"{next_dt.strftime('%d.%m')} ~{next_dt.strftime('%H:00')} МСК"
+        else:
+            next_s = "??"
+
         card = (
             f"🟦 Круг #{acc['id']} — Аккаунт: {acc['login']}\n"
             f"💰 Вложено: {acc['amount'] or '??'}\n"
@@ -178,6 +191,7 @@ def circles_text() -> str:
             f"🔁 Схема: {acc['scheme'] or '??'}\n"
             f"⚠️ Статус схемы: {acc['check_note'] or '??'}\n"
             f"📝 Примечание: {acc['status'] or '??'}\n"
+            f"🕐 След. обновление: {next_s}\n"
             f"{SEP}")
         blocks.append(card)
 
