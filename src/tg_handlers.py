@@ -37,8 +37,21 @@ def _main_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def _invest_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def _invest_kb(page: int = 0) -> InlineKeyboardMarkup:
+    total = dashboard.invest_pages()
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "◀️", callback_data=f"inv:p:{page - 1}"))
+    nav.append(InlineKeyboardButton(
+        f"{page + 1}/{total}", callback_data="noop"))
+    if page < total - 1:
+        nav.append(InlineKeyboardButton(
+            "▶️", callback_data=f"inv:p:{page + 1}"))
+    rows = []
+    if total > 1:
+        rows.append(nav)
+    rows.extend([
         [InlineKeyboardButton("➕ Добавить",
                               callback_data="inv:add"),
          InlineKeyboardButton("🗑 Удалить",
@@ -48,6 +61,7 @@ def _invest_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔙 Назад",
                               callback_data="back")],
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def _circles_kb() -> InlineKeyboardMarkup:
@@ -98,8 +112,17 @@ async def on_callback(update: Update,
     # --- Главное меню ---
     if data == "sec:invest":
         await q.message.edit_text(
-            dashboard.invest_text(), parse_mode="HTML",
-            reply_markup=_invest_kb())
+            dashboard.invest_text(0), parse_mode="HTML",
+            reply_markup=_invest_kb(0))
+
+    elif data.startswith("inv:p:"):
+        page = int(data.split(":")[2])
+        await q.message.edit_text(
+            dashboard.invest_text(page), parse_mode="HTML",
+            reply_markup=_invest_kb(page))
+
+    elif data == "noop":
+        pass
 
     elif data == "sec:circles":
         await q.message.edit_text(
@@ -160,12 +183,12 @@ async def on_callback(update: Update,
         def _do():
             import daemon
             daemon.run_update()
-            text = dashboard.invest_text()
+            text = dashboard.invest_text(0)
             asyncio.run_coroutine_threadsafe(
                 bot.edit_message_text(
                     text, chat_id=chat_id, message_id=msg_id,
                     parse_mode="HTML",
-                    reply_markup=_invest_kb()),
+                    reply_markup=_invest_kb(0)),
                 loop)
 
         import threading

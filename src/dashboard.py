@@ -51,8 +51,11 @@ def _aggregate_inventories() -> list:
     return result
 
 
-def invest_text() -> str:
-    """Текст раздела Инвестиции — реальные предметы с аккаунтов."""
+INVEST_PAGE_SIZE = 30  # строк на страницу
+
+
+def invest_text(page: int = 0) -> str:
+    """Текст раздела Инвестиции — страница page."""
     items = _aggregate_inventories()
     if not items:
         return "📊 <b>Инвестиции</b>\n\nНет предметов на аккаунтах."
@@ -60,15 +63,20 @@ def invest_text() -> str:
     now = datetime.now(MSK).strftime("%d.%m.%Y, %H:%M МСК")
     total_qty = sum(i["qty"] for i in items)
     total_val = sum(i["total"] for i in items)
+    priced = len([i for i in items if i["price"] > 0])
 
-    # Все предметы, сортировка по стоимости
     all_items = sorted(items, key=lambda x: x["total"],
                        reverse=True)
 
-    # Полные названия, горизонтальный скролл в <pre>
-    W = 40  # ширина колонки Name
+    total_pages = max(1, -(-len(all_items) // INVEST_PAGE_SIZE))
+    page = max(0, min(page, total_pages - 1))
+    start = page * INVEST_PAGE_SIZE
+    end = start + INVEST_PAGE_SIZE
+    page_items = all_items[start:end]
+
+    W = 40
     rows = []
-    for item in all_items:
+    for item in page_items:
         name = item["name"]
         if len(name) > W:
             name = name[:W - 1] + "…"
@@ -82,41 +90,24 @@ def invest_text() -> str:
 
     header = (
         f"📊 <b>Инвестиции</b>\n"
-        f"📦 Предметов: {total_qty}\n"
-        f"💰 Оценка: ${total_val:.2f}\n"
+        f"📦 Предметов: {total_qty} | "
+        f"Оценка: ${total_val:.2f}\n"
         f"🕐 {now}\n")
 
     hdr = f"{'Предмет':<{W}}│ Кол│  Цена │  Всего"
     sep = ("─" * W + "┼" + "─" * 4 + "┼" +
            "─" * 7 + "┼" + "─" * 8)
     table = "\n".join([hdr, sep] + rows)
+    footer = (f"\nОценено: {priced}/{len(items)} | "
+              f"Стр {page + 1}/{total_pages}")
 
-    priced = len([i for i in items if i["price"] > 0])
-    footer = f"\nОценено: {priced}/{len(items)} предметов"
+    return f"{header}\n<pre>{table}{footer}</pre>"
 
-    full = f"{header}\n<pre>{table}{footer}</pre>"
 
-    # Telegram лимит 4096 — разбиваем если нужно
-    if len(full) <= 4096:
-        return full
-
-    # Показываем топ по стоимости, сколько влезет
-    parts = [header, "<pre>" + hdr + "\n" + sep]
-    cur_len = len(header) + len(hdr) + len(sep) + 15  # pre tags
-    shown = 0
-    for row in rows:
-        if cur_len + len(row) + 2 > 3900:  # запас
-            break
-        parts.append(row)
-        cur_len += len(row) + 1
-        shown += 1
-
-    remaining = len(all_items) - shown
-    parts.append(
-        f"{footer}\n"
-        f"Показано: {shown}/{len(all_items)}"
-        f" (ещё {remaining})</pre>")
-    return "\n".join(parts)
+def invest_pages() -> int:
+    """Количество страниц инвестиций."""
+    items = _aggregate_inventories()
+    return max(1, -(-len(items) // INVEST_PAGE_SIZE))
 
 
 def circles_text() -> str:
