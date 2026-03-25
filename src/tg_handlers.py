@@ -7,7 +7,8 @@ import asyncio
 import logging
 
 from telegram import (Update, InlineKeyboardButton,
-                      InlineKeyboardMarkup)
+                      InlineKeyboardMarkup,
+                      ReplyKeyboardMarkup, KeyboardButton)
 from telegram.ext import (ContextTypes, CommandHandler,
                           CallbackQueryHandler, MessageHandler,
                           filters)
@@ -26,15 +27,12 @@ def _auth(update: Update) -> bool:
     return uid == AUTHORIZED_USER
 
 
-def _main_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Инвестиции",
-                              callback_data="sec:invest"),
-         InlineKeyboardButton("🔄 Круги",
-                              callback_data="sec:circles")],
-        [InlineKeyboardButton("📜 История",
-                              callback_data="sec:history")],
-    ])
+def _main_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📊 Инвестиции"),
+          KeyboardButton("🔄 Круги")],
+         [KeyboardButton("📜 История")]],
+        resize_keyboard=True)
 
 
 def _invest_kb(page: int = 0) -> InlineKeyboardMarkup:
@@ -148,7 +146,7 @@ async def on_callback(update: Update,
         active = len([a for a in cir_accs
                       if a["status"] in ("buy", "hold")])
         done = len([a for a in cir_accs if a["status"] == "done"])
-        await q.message.edit_text(
+        await q.message.reply_text(
             f"📊 <b>Investment Bot</b>\n\n"
             f"Инвестиции: {len(inv_accs)} акк\n"
             f"Активных кругов: {active}\n"
@@ -176,7 +174,7 @@ async def on_callback(update: Update,
         acc = db.get_invest_account(acc_id)
         if acc:
             db.delete_invest_account(acc_id)
-        await q.message.edit_text(
+        await q.message.reply_text(
             f"✅ Удалён: {acc['login'] if acc else '?'}",
             reply_markup=_main_kb())
 
@@ -311,7 +309,7 @@ async def on_callback(update: Update,
         ctx.user_data.clear()
         if acc_id:
             db.update_circle_account(acc_id, **{field: value})
-        await q.message.edit_text(
+        await q.message.reply_text(
             "✅ Обновлено", reply_markup=_main_kb())
 
 
@@ -322,9 +320,32 @@ async def handle_text(update: Update,
                       ctx: ContextTypes.DEFAULT_TYPE):
     if not _auth(update):
         return
+    text = update.message.text.strip()
+
+    # --- Постоянные кнопки меню ---
+    if text == "📊 Инвестиции":
+        ctx.user_data.clear()
+        await update.message.reply_text(
+            dashboard.invest_text(0), parse_mode="HTML",
+            reply_markup=_invest_kb(0))
+        return
+    elif text == "🔄 Круги":
+        ctx.user_data.clear()
+        await update.message.reply_text(
+            dashboard.circles_text(), parse_mode="HTML",
+            reply_markup=_circles_kb())
+        return
+    elif text == "📜 История":
+        ctx.user_data.clear()
+        await update.message.reply_text(
+            dashboard.history_text(), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад",
+                                     callback_data="back")]]))
+        return
+
     flow = ctx.user_data.get("flow")
     step = ctx.user_data.get("step")
-    text = update.message.text.strip()
 
     # --- Инвестиции: добавить ---
     if flow == "inv_add":
