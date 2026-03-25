@@ -198,8 +198,8 @@ def circles_text() -> str:
             f"🔁 Схема: {acc['scheme'] or '??'}\n"
             f"⚠️ Статус схемы: {acc['check_note'] or '??'}\n"
             f"📝 Примечание: {acc['status'] or '??'}\n"
-            f"🕐 След. обновление: {next_s}\n"
-            f"{SEP}")
+            f"🕐 След. обновление: {next_s}\n\n"
+            f"{SEP}\n")
         blocks.append(card)
 
     blocks.append(f"\n💰 Вложено: ${total_amount:.0f}")
