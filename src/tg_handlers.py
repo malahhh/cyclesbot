@@ -3,6 +3,7 @@
 Главное меню: 📊 Инвестиции | 🔄 Круги | 📜 История
 """
 
+import asyncio
 import logging
 
 from telegram import (Update, InlineKeyboardButton,
@@ -150,10 +151,24 @@ async def on_callback(update: Update,
             reply_markup=_main_kb())
 
     elif data == "inv:refresh":
-        await q.message.edit_text("🔄 Обновление запущено...")
-        import threading
+        await q.message.edit_text("🔄 Обновляю инвентари...")
+        chat_id = q.message.chat_id
+        msg_id = q.message.message_id
+        bot = ctx.bot
+        loop = asyncio.get_event_loop()
+
         def _do():
-            import daemon; daemon.run_update()
+            import daemon
+            daemon.run_update()
+            text = dashboard.invest_text()
+            asyncio.run_coroutine_threadsafe(
+                bot.edit_message_text(
+                    text, chat_id=chat_id, message_id=msg_id,
+                    parse_mode="HTML",
+                    reply_markup=_invest_kb()),
+                loop)
+
+        import threading
         threading.Thread(target=_do, daemon=True).start()
 
     # --- Круги: добавить ---
