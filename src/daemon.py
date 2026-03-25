@@ -14,9 +14,7 @@ import dashboard
 log = logging.getLogger("invest")
 
 _thread = None
-# Интервал: 8-16 часов (1-3 раза/день)
-MIN_INTERVAL = 8 * 3600
-MAX_INTERVAL = 16 * 3600
+INTERVAL = 24 * 3600  # раз в сутки
 
 
 def update_account(acc: dict):
@@ -79,8 +77,8 @@ def _loop():
             run_update()
         except Exception as e:
             log.error("Daemon error: %s", e)
-        # Следующее через 8-16 часов
-        interval = random.uniform(MIN_INTERVAL, MAX_INTERVAL)
+        # Следующее через 24ч (± 1ч рандом)
+        interval = INTERVAL + random.uniform(-3600, 3600)
         log.info("Следующее обновление через %.1f ч",
                  interval / 3600)
         time.sleep(interval)
