@@ -37,19 +37,23 @@ def update_steam_account(steam_id: str, login: str):
 
 
 def run_update():
-    """Один цикл: обновить invest_accounts."""
-    accounts = db.get_invest_accounts()
-    if not accounts:
-        log.info("Нет invest аккаунтов для обновления")
-        return
+    """Один цикл: обновить invest + circle accounts."""
+    inv_accounts = db.get_invest_accounts()
+    cir_accounts = db.get_circle_accounts()
+    active_cir = [a for a in cir_accounts
+                  if a["status"] in ("buy", "hold", "sale")]
 
-    # Уникальные steam_id (один аккаунт может быть и в invest, и в circles)
+    # Уникальные steam_id
     seen = set()
     to_update = []
-    for acc in accounts:
+    for acc in inv_accounts + active_cir:
         if acc["steam_id"] not in seen:
             seen.add(acc["steam_id"])
             to_update.append(acc)
+
+    if not to_update:
+        log.info("Нет аккаунтов для обновления")
+        return
 
     log.info("Обновление инвентарей: %d аккаунтов", len(to_update))
     for acc in to_update:
