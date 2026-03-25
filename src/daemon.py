@@ -1,4 +1,4 @@
-"""Фоновый демон — обновление инвентарей 1-3 раза/день."""
+"""Фоновый демон — обновление инвентарей раз в сутки."""
 
 import json
 import logging
@@ -9,7 +9,6 @@ import time
 import db
 import inventory
 import pricing
-import dashboard
 
 log = logging.getLogger("invest")
 
@@ -59,11 +58,7 @@ def run_update():
         log.info("  Задержка: %.0fс", delay)
         time.sleep(delay)
 
-    # Обновить дашборды
-    try:
-        dashboard.update_all()
-    except Exception as e:
-        log.error("Dashboard update: %s", e)
+    # Дашборд обновляется inline в боте, не в канале
 
     log.info("Обновление завершено")
 
