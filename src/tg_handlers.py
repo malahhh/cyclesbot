@@ -106,19 +106,14 @@ def _circle_card_kb(acc_id: int) -> InlineKeyboardMarkup:
 
 
 def _circles_kb() -> InlineKeyboardMarkup:
-    accs = db.get_circle_accounts()
-    active = [a for a in accs
-              if a["status"] in ("buy", "hold", "sale")]
-    rows = []
-    # Каждый аккаунт — кликабельная кнопка
-    for a in active:
-        emoji = STATUS_EMOJI.get(a["status"], "⚪")
-        rows.append([InlineKeyboardButton(
-            f"{emoji} {a['login']} | {a['amount']}",
-            callback_data=f"cir:view:{a['id']}")])
-    rows.append([InlineKeyboardButton("➕ Добавить круг",
-                                      callback_data="cir:add")])
-    return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Добавить круг",
+                              callback_data="cir:add")],
+        [InlineKeyboardButton("✏️ Редактировать круг",
+                              callback_data="cir:edit_pick")],
+        [InlineKeyboardButton("✅ Завершить круг",
+                              callback_data="cir:finish_pick")],
+    ])
 
 
 # ============================================================
@@ -252,6 +247,51 @@ async def on_callback(update: Update,
         ctx.user_data["step"] = "login"
         await q.message.edit_text(
             "Введи имя аккаунта для нового круга:")
+
+    # --- Круги: редактировать — выбор аккаунта ---
+    elif data == "cir:edit_pick":
+        accs = db.get_circle_accounts()
+        active = [a for a in accs
+                  if a["status"] in ("buy", "hold", "sale")]
+        if not active:
+            await q.message.edit_text("Нет активных кругов.",
+                                      reply_markup=_circles_kb())
+            return
+        # По 3 кнопки в ряд
+        rows = []
+        row = []
+        for a in active:
+            row.append(InlineKeyboardButton(
+                a["login"], callback_data=f"cir:view:{a['id']}"))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([InlineKeyboardButton(
+            "🔙 Назад", callback_data="sec:circles")])
+        await q.message.edit_text(
+            "Выберите аккаунт:",
+            reply_markup=InlineKeyboardMarkup(rows))
+
+    # --- Круги: завершить — выбор аккаунта ---
+    elif data == "cir:finish_pick":
+        accs = db.get_circle_accounts()
+        active = [a for a in accs
+                  if a["status"] in ("buy", "hold", "sale")]
+        if not active:
+            await q.message.edit_text("Нет активных кругов.",
+                                      reply_markup=_circles_kb())
+            return
+        rows = [[InlineKeyboardButton(
+            f"✅ {a['login']} ({a['amount']})",
+            callback_data=f"cir:fin:{a['id']}")]
+            for a in active]
+        rows.append([InlineKeyboardButton(
+            "🔙 Назад", callback_data="sec:circles")])
+        await q.message.edit_text(
+            "Выберите круг для завершения:",
+            reply_markup=InlineKeyboardMarkup(rows))
 
     # --- Круги: просмотр аккаунта ---
     elif data.startswith("cir:view:"):

@@ -140,18 +140,20 @@ def circles_text() -> str:
     if not active:
         return "🔄 <b>Круги</b>\n\nНет активных кругов."
 
-    lines = ["🔄 <b>Круги</b>\n"]
+    SEP = "━" * 22
+    blocks = ["🔄 <b>Круги</b>\n"]
     total_amount = 0.0
 
     for acc in active:
         emoji = STATUS_EMOJI.get(acc["status"], "⚪")
+        # Инвентарь
         inv_parts = []
         for app_id, game in [(730, "CS2"), (570, "Dota2")]:
             inv = db.get_inventory(acc["steam_id"], app_id)
             if inv and inv["items_count"] > 0:
                 inv_parts.append(
-                    f"{game}: {inv['items_count']} "
-                    f"(${inv['total_value']:.2f})")
+                    f"{game}: {inv['items_count']} | "
+                    f"💵 ≈${inv['total_value']:.2f}")
         inv_line = " | ".join(inv_parts) if inv_parts else "—"
 
         try:
@@ -161,17 +163,18 @@ def circles_text() -> str:
         except (ValueError, IndexError):
             pass
 
-        block = [f"<b>{acc['login']}</b> | {acc['amount']}"]
-        block.append(f"  📦 {inv_line}")
+        card = f"🟦 {acc['login']} | {acc['amount']}\n"
+        card += f"📦 {inv_line}\n"
         if acc["scheme"]:
-            block.append(f"  🔄 {acc['scheme']}")
+            card += f"🔁 {acc['scheme']}\n"
         if acc["check_note"]:
-            block.append(f"  📋 {acc['check_note']}")
-        block.append(f"  {emoji} {acc['status']}")
-        lines.append("\n".join(block))
+            card += f"⚠️ {acc['check_note']}\n"
+        card += f"{emoji} {acc['status']}\n"
+        card += SEP
+        blocks.append(card)
 
-    lines.append(f"\n💰 Вложено: ${total_amount:.0f}")
-    return "\n\n".join(lines)
+    blocks.append(f"\n💰 Вложено: ${total_amount:.0f}")
+    return "\n".join(blocks)
 
 
 def history_text() -> str:
