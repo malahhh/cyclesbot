@@ -51,13 +51,18 @@ def _invest_kb(page: int = 0) -> InlineKeyboardMarkup:
     rows = []
     if total > 1:
         rows.append(nav)
+    # Кнопки обновления для каждого аккаунта
+    accs = db.get_invest_accounts()
+    if accs:
+        refresh_row = [InlineKeyboardButton(
+            f"🔄 {a['login']}", callback_data=f"inv:ref:{a['id']}")
+            for a in accs]
+        rows.append(refresh_row)
     rows.extend([
         [InlineKeyboardButton("➕ Добавить",
                               callback_data="inv:add"),
          InlineKeyboardButton("🗑 Удалить",
                               callback_data="inv:del_pick")],
-        [InlineKeyboardButton("🔄 Обновить",
-                              callback_data="inv:refresh")],
         [InlineKeyboardButton("🔙 Назад",
                               callback_data="back")],
     ])
@@ -175,16 +180,22 @@ async def on_callback(update: Update,
             f"✅ Удалён: {acc['login'] if acc else '?'}",
             reply_markup=_main_kb())
 
-    elif data == "inv:refresh":
-        await q.message.edit_text("🔄 Обновляю инвентари...")
+    elif data.startswith("inv:ref:"):
+        acc_id = int(data.split(":")[2])
+        acc = db.get_invest_account(acc_id)
+        if not acc:
+            return
+        await q.message.edit_text(
+            f"🔄 Обновляю <b>{acc['login']}</b>...",
+            parse_mode="HTML")
         chat_id = q.message.chat_id
         msg_id = q.message.message_id
         bot = ctx.bot
         loop = asyncio.get_event_loop()
 
-        def _do():
+        def _do_one(a=acc):
             import daemon
-            daemon.run_update()
+            daemon.update_steam_account(a["steam_id"], a["login"])
             text = dashboard.invest_text(0)
             asyncio.run_coroutine_threadsafe(
                 bot.edit_message_text(
@@ -194,7 +205,7 @@ async def on_callback(update: Update,
                 loop)
 
         import threading
-        threading.Thread(target=_do, daemon=True).start()
+        threading.Thread(target=_do_one, daemon=True).start()
 
     # --- Круги: добавить ---
     elif data == "cir:add":
