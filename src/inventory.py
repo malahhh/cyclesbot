@@ -28,7 +28,7 @@ def get_inventory(steam_id: str, app_id: int = 730) -> list:
     last_asset_id = None
 
     for page in range(20):  # макс 20 страниц
-        params = {"l": "english", "count": 5000}
+        params = {"l": "english", "count": 2000}
         if last_asset_id:
             params["start_assetid"] = last_asset_id
 
