@@ -90,8 +90,8 @@ def invest_text(page: int = 0) -> str:
 
     header = (
         f"📊 <b>Инвестиции</b>\n"
-        f"📦 Предметов: {total_qty} | "
-        f"Оценка: ${total_val:.2f}\n"
+        f"📦 {len(all_items)} уникальных / {total_qty} шт\n"
+        f"💰 Оценка: ${total_val:.2f}\n"
         f"🕐 {now}\n")
 
     hdr = f"{'Предмет':<{W}}│ Кол│  Цена │  Всего"
