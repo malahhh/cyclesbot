@@ -28,7 +28,7 @@ def get_inventory(steam_id: str, app_id: int = 730) -> list:
     last_asset_id = None
 
     for page in range(20):  # макс 20 страниц
-        params = {"l": "english", "count": 2000}
+        params = {"l": "english", "count": 5000}
         if last_asset_id:
             params["start_assetid"] = last_asset_id
 
@@ -68,11 +68,17 @@ def get_inventory(steam_id: str, app_id: int = 730) -> list:
                 name = descs.get(key, "Unknown")
                 count = int(a.get("amount", 1))
                 items[name] += count
-                last_asset_id = a.get("assetid")
 
-            # Больше нет?
+            log.info("  page %d: %d assets (total so far: %d)",
+                     page + 1, len(assets),
+                     sum(items.values()))
+
+            # Пагинация: last_assetid из ответа
             if not data.get("more_items"):
                 break
+            last_asset_id = data.get("last_assetid")
+            if not last_asset_id and assets:
+                last_asset_id = assets[-1].get("assetid")
 
             time.sleep(random.uniform(1.0, 2.0))
 
