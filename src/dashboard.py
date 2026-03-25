@@ -171,7 +171,7 @@ def circles_text() -> str:
         val_s = f"${steam_val:.2f}" if steam_val > 0 else "??"
 
         card = (
-            f"🟦 Аккаунт: {acc['login']}\n"
+            f"🟦 Круг #{acc['id']} — Аккаунт: {acc['login']}\n"
             f"💰 Вложено: {acc['amount'] or '??'}\n"
             f"📦 Количество предметов: {cnt_s} | "
             f"💵 Оценка Steam: {val_s}\n"

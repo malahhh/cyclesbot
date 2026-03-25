@@ -79,7 +79,7 @@ def _circle_card(acc: dict) -> str:
     cnt_s = str(items_count) if items_count else "??"
     val_s = f"${total_value:.2f}" if total_value > 0 else "??"
     return (
-        f"🟦 Аккаунт: <b>{acc['login']}</b>\n"
+        f"🟦 Круг #{acc['id']} — Аккаунт: <b>{acc['login']}</b>\n"
         f"💰 Вложено: {acc['amount'] or '??'}\n"
         f"📦 Количество предметов: {cnt_s} | "
         f"💵 Оценка Steam: {val_s}\n"
