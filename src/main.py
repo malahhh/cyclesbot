@@ -33,9 +33,8 @@ def main():
     setup_logging()
     log = logging.getLogger("invest")
 
-    # Init DB + migration
+    # Init DB (миграция отключена — аккаунты добавляет пользователь)
     db.get_conn()
-    migration.run()
 
     log.info("=" * 40)
     log.info("  Investment Bot v1.0")
