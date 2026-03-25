@@ -53,10 +53,10 @@ def _circles_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить круг",
                               callback_data="cir:add")],
+        [InlineKeyboardButton("✏️ Редактировать круг",
+                              callback_data="cir:edit_pick")],
         [InlineKeyboardButton("✅ Завершить круг",
                               callback_data="cir:finish_pick")],
-        [InlineKeyboardButton("✏️ Изменить",
-                              callback_data="cir:edit_pick")],
         [InlineKeyboardButton("🔙 Назад",
                               callback_data="back")],
     ])
