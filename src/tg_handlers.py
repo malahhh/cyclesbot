@@ -78,13 +78,18 @@ def _circle_card(acc: dict) -> str:
             total_value += inv["total_value"]
     cnt_s = str(items_count) if items_count else "??"
     val_s = f"${total_value:.2f}" if total_value > 0 else "??"
-    import daemon as _daemon
     from datetime import datetime, timezone, timedelta
+    import time as _time
     _MSK = timezone(timedelta(hours=3))
-    next_ts = _daemon.get_next_update(acc["steam_id"])
+    next_ts = db.get_next_update(acc["steam_id"])
     if next_ts:
+        eta_h = (next_ts - _time.time()) / 3600
         next_dt = datetime.fromtimestamp(next_ts, _MSK)
-        next_s = f"{next_dt.strftime('%d.%m')} ~{next_dt.strftime('%H:%M')} МСК"
+        if eta_h > 0:
+            next_s = (f"через {eta_h:.0f}ч "
+                      f"(~{next_dt.strftime('%H:%M')} МСК)")
+        else:
+            next_s = "скоро"
     else:
         next_s = "??"
     return (

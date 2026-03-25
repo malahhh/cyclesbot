@@ -81,17 +81,18 @@ def invest_text(page: int = 0) -> str:
         if parts:
             line = f"• {acc['login']} — {' | '.join(parts)}"
             if latest_upd:
-                import daemon as _daemon
                 upd_dt = datetime.fromtimestamp(latest_upd, MSK)
-                next_ts = _daemon.get_next_update(acc["steam_id"])
+                next_ts = db.get_next_update(acc["steam_id"])
+                line += f"\n  обновлено {upd_dt.strftime('%d.%m %H:%M')}"
                 if next_ts:
-                    next_dt = datetime.fromtimestamp(next_ts, MSK)
-                    next_s = (f"{next_dt.strftime('%d.%m')} "
-                              f"~{next_dt.strftime('%H:%M')}")
-                else:
-                    next_s = "??"
-                line += (f"\n  обновлено {upd_dt.strftime('%d.%m %H:%M')}"
-                         f" | след: {next_s}")
+                    import time as _time
+                    eta_h = (next_ts - _time.time()) / 3600
+                    if eta_h > 0:
+                        next_dt = datetime.fromtimestamp(next_ts, MSK)
+                        line += (f" | след. через {eta_h:.0f}ч "
+                                 f"(~{next_dt.strftime('%H:%M')} МСК)")
+                    else:
+                        line += " | обновление скоро"
             acc_lines.append(line)
         else:
             acc_lines.append(f"• {acc['login']} — нет данных")
@@ -176,11 +177,16 @@ def circles_text() -> str:
         val_s = f"${steam_val:.2f}" if steam_val > 0 else "??"
 
         # След. обновление
-        import daemon as _daemon
-        next_ts = _daemon.get_next_update(acc["steam_id"])
+        import time as _time
+        next_ts = db.get_next_update(acc["steam_id"])
         if next_ts:
+            eta_h = (next_ts - _time.time()) / 3600
             next_dt = datetime.fromtimestamp(next_ts, MSK)
-            next_s = f"{next_dt.strftime('%d.%m')} ~{next_dt.strftime('%H:%M')} МСК"
+            if eta_h > 0:
+                next_s = (f"через {eta_h:.0f}ч "
+                          f"(~{next_dt.strftime('%H:%M')} МСК)")
+            else:
+                next_s = "скоро"
         else:
             next_s = "??"
 

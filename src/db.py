@@ -58,6 +58,12 @@ def _init_tables():
             updated_at REAL DEFAULT 0,
             UNIQUE(steam_id, app_id)
         );
+
+        -- Расписание обновлений (ключ = steam_id)
+        CREATE TABLE IF NOT EXISTS update_schedule (
+            steam_id TEXT PRIMARY KEY,
+            next_update_at REAL DEFAULT 0
+        );
     """)
     c.commit()
 
@@ -170,6 +176,24 @@ def save_inventory(steam_id: str, app_id: int,
         (steam_id, app_id, items_count, items_json,
          total_value, time.time()))
     c.commit()
+
+
+def set_next_update(steam_id: str, next_at: float):
+    c = get_conn()
+    c.execute(
+        """INSERT INTO update_schedule (steam_id, next_update_at)
+           VALUES (?, ?)
+           ON CONFLICT(steam_id) DO UPDATE SET
+           next_update_at=excluded.next_update_at""",
+        (steam_id, next_at))
+    c.commit()
+
+
+def get_next_update(steam_id: str) -> float:
+    r = get_conn().execute(
+        "SELECT next_update_at FROM update_schedule WHERE steam_id=?",
+        (steam_id,)).fetchone()
+    return float(r[0]) if r else 0
 
 
 def get_inventory(steam_id: str, app_id: int) -> dict:
