@@ -69,19 +69,25 @@ def invest_text(page: int = 0) -> str:
     acc_lines = []
     for acc in accs:
         parts = []
+        latest_upd = 0
         for app_id, game in [(730, "CS2"), (570, "Dota2")]:
             inv = db.get_inventory(acc["steam_id"], app_id)
             if inv and inv["items_count"] > 0:
-                upd = ""
-                if inv["updated_at"]:
-                    dt = datetime.fromtimestamp(
-                        inv["updated_at"], MSK)
-                    upd = f" — обновлено {dt.strftime('%d.%m %H:%M')}"
                 parts.append(
                     f"{game}: {inv['items_count']} шт / "
-                    f"${inv['total_value']:.2f}{upd}")
+                    f"${inv['total_value']:.2f}")
+                if inv["updated_at"] and inv["updated_at"] > latest_upd:
+                    latest_upd = inv["updated_at"]
         if parts:
-            acc_lines.append(f"• {acc['login']} — {' | '.join(parts)}")
+            line = f"• {acc['login']} — {' | '.join(parts)}"
+            if latest_upd:
+                upd_dt = datetime.fromtimestamp(latest_upd, MSK)
+                next_dt = datetime.fromtimestamp(
+                    latest_upd + 24 * 3600, MSK)
+                line += (f"\n  обновлено {upd_dt.strftime('%d.%m %H:%M')}"
+                         f" | след: {next_dt.strftime('%d.%m')} "
+                         f"~{next_dt.strftime('%H:00')}")
+            acc_lines.append(line)
         else:
             acc_lines.append(f"• {acc['login']} — нет данных")
     acc_block = "\n".join(acc_lines)
