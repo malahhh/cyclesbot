@@ -58,10 +58,33 @@ def invest_text(page: int = 0) -> str:
     if not items:
         return "📊 <b>Инвестиции</b>\n\nНет предметов на аккаунтах."
 
+    import json as _json
     now = datetime.now(MSK).strftime("%d.%m.%Y, %H:%M МСК")
     total_qty = sum(i["qty"] for i in items)
     total_val = sum(i["total"] for i in items)
     priced = len([i for i in items if i["price"] > 0])
+
+    # Список аккаунтов с инфой
+    accs = db.get_invest_accounts()
+    acc_lines = []
+    for acc in accs:
+        parts = []
+        for app_id, game in [(730, "CS2"), (570, "Dota2")]:
+            inv = db.get_inventory(acc["steam_id"], app_id)
+            if inv and inv["items_count"] > 0:
+                upd = ""
+                if inv["updated_at"]:
+                    dt = datetime.fromtimestamp(
+                        inv["updated_at"], MSK)
+                    upd = f" — обновлено {dt.strftime('%d.%m %H:%M')}"
+                parts.append(
+                    f"{game}: {inv['items_count']} шт / "
+                    f"${inv['total_value']:.2f}{upd}")
+        if parts:
+            acc_lines.append(f"• {acc['login']} — {' | '.join(parts)}")
+        else:
+            acc_lines.append(f"• {acc['login']} — нет данных")
+    acc_block = "\n".join(acc_lines)
 
     all_items = sorted(items, key=lambda x: x["total"],
                        reverse=True)
@@ -89,7 +112,8 @@ def invest_text(page: int = 0) -> str:
     header = (
         f"📊 <b>Инвестиции</b>\n"
         f"📦 {len(all_items)} уникальных / {total_qty} шт\n"
-        f"💰 Оценка: ${total_val:.2f}\n"
+        f"💰 Оценка: ${total_val:.2f}\n\n"
+        f"📋 Аккаунты:\n{acc_block}\n\n"
         f"🕐 {now}\n")
 
     hdr = f"{'Предмет':<{W}}│ Кол│  Цена │  Всего"
