@@ -61,27 +61,24 @@ def invest_text() -> str:
     total_qty = sum(i["qty"] for i in items)
     total_val = sum(i["total"] for i in items)
 
-    # Топ-20 по стоимости
-    top = sorted(items, key=lambda x: x["total"], reverse=True)[:20]
+    # Все предметы, сортировка по стоимости
+    all_items = sorted(items, key=lambda x: x["total"],
+                       reverse=True)
 
+    # Полные названия, горизонтальный скролл в <pre>
+    W = 40  # ширина колонки Name
     rows = []
-    for item in top:
-        short = item["name"]
-        # Сокращаем длинные названия
-        for rm in (" (Factory New)", " (Minimal Wear)",
-                   " (Field-Tested)", " (Well-Worn)",
-                   " (Battle-Scarred)", "StatTrak™ ",
-                   "Souvenir ", "Sticker | "):
-            short = short.replace(rm, "")
-        if len(short) > 16:
-            short = short[:15] + "…"
-
+    for item in all_items:
+        name = item["name"]
+        if len(name) > W:
+            name = name[:W - 1] + "…"
         p = item["price"]
         t = item["total"]
+        p_s = f"${p:.2f}" if p > 0 else "—"
+        t_s = f"${t:.2f}" if t > 0 else "—"
         rows.append(
-            f"{short:<16}│{item['qty']:>4}│"
-            f"{'—' if p == 0 else f'${p:.2f}':>6}│"
-            f"{'—' if t == 0 else f'${t:.2f}':>8}")
+            f"{name:<{W}}│{item['qty']:>4}│"
+            f"{p_s:>7}│{t_s:>8}")
 
     header = (
         f"📊 <b>Инвестиции</b>\n"
@@ -89,14 +86,37 @@ def invest_text() -> str:
         f"💰 Оценка: ${total_val:.2f}\n"
         f"🕐 {now}\n")
 
-    hdr = f"{'Предмет':<16}│ Кол│ Цена │  Всего"
-    sep = "─" * 16 + "┼" + "─" * 4 + "┼" + "─" * 6 + "┼" + "─" * 8
+    hdr = f"{'Предмет':<{W}}│ Кол│  Цена │  Всего"
+    sep = ("─" * W + "┼" + "─" * 4 + "┼" +
+           "─" * 7 + "┼" + "─" * 8)
     table = "\n".join([hdr, sep] + rows)
 
     priced = len([i for i in items if i["price"] > 0])
     footer = f"\nОценено: {priced}/{len(items)} предметов"
 
-    return f"{header}\n<pre>{table}{footer}</pre>"
+    full = f"{header}\n<pre>{table}{footer}</pre>"
+
+    # Telegram лимит 4096 — разбиваем если нужно
+    if len(full) <= 4096:
+        return full
+
+    # Показываем топ по стоимости, сколько влезет
+    parts = [header, "<pre>" + hdr + "\n" + sep]
+    cur_len = len(header) + len(hdr) + len(sep) + 15  # pre tags
+    shown = 0
+    for row in rows:
+        if cur_len + len(row) + 2 > 3900:  # запас
+            break
+        parts.append(row)
+        cur_len += len(row) + 1
+        shown += 1
+
+    remaining = len(all_items) - shown
+    parts.append(
+        f"{footer}\n"
+        f"Показано: {shown}/{len(all_items)}"
+        f" (ещё {remaining})</pre>")
+    return "\n".join(parts)
 
 
 def circles_text() -> str:
