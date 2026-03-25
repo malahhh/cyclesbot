@@ -55,7 +55,7 @@ def migrate_cs2():
     count = 0
     for name, prices in data.get("items", {}).items():
         qty = prices.get("qty", 0)
-        buy_price = prices.get("buy_price", 0)
+        buy_price = prices.get("avg_buy") or prices.get("buy_price", 0)
         steam = prices.get("steam", 0)
         mc = prices.get("market_csgo", 0)
         db.save_cs2_investment(name, qty, buy_price, steam, mc)

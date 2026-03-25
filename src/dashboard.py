@@ -11,28 +11,70 @@ STATUS_EMOJI = {"buy": "🟢", "hold": "🟡", "sale": "🟠", "done": "✅"}
 
 
 def invest_text() -> str:
-    """Текст раздела Инвестиции."""
-    accs = db.get_accounts()
-    if not accs:
-        return "📊 <b>Инвестиции</b>\n\nНет аккаунтов."
+    """Текст раздела Инвестиции (CS2 таблица)."""
+    items = db.get_cs2_investments()
+    if not items:
+        return "📈 <b>Дашборд инвестиций CS2</b>\n\nНет данных."
 
-    lines = ["📊 <b>Инвестиции</b>\n"]
-    total_val = 0.0
+    now = datetime.now(MSK).strftime("%d.%m.%Y, %H:%M МСК")
+    total_qty = 0
+    total_buy = 0.0
+    total_steam = 0.0
+    total_mc = 0.0
 
-    for acc in accs:
-        inv_parts = []
-        for app_id, game in [(730, "CS2"), (570, "Dota2")]:
-            inv = db.get_inventory(acc["id"], app_id)
-            if inv and inv["items_count"] > 0:
-                inv_parts.append(
-                    f"{game}: {inv['items_count']} "
-                    f"(${inv['total_value']:.2f})")
-                total_val += inv["total_value"]
-        inv_line = " | ".join(inv_parts) if inv_parts else "—"
-        lines.append(f"<b>{acc['login']}</b>\n  📦 {inv_line}")
+    rows = []
+    for item in items:
+        qty = item["qty"]
+        bp = item["buy_price"]
+        sp = item["steam_price"]
+        mc = item["market_csgo_price"]
+        ps = item.get("prev_steam") or sp
+        pm = item.get("prev_mc") or mc
 
-    lines.append(f"\n💰 Итого: ${total_val:.2f}")
-    return "\n".join(lines)
+        # Δ%
+        ds = ((sp - ps) / ps * 100) if ps > 0 else 0
+        dm = ((mc - pm) / pm * 100) if pm > 0 else 0
+        ds_icon = "🟢" if ds > 10 else ("🔴" if ds < -5 else "")
+        dm_icon = "🟢" if dm > 10 else ("🔴" if dm < -5 else "")
+
+        # Сокращённое имя
+        short = (item["name"].replace(" Case", "")
+                 .replace("Desert Eagle | Tilted (Factory New)",
+                          "Deagle FN"))
+        if len(short) > 12:
+            short = short[:11] + "…"
+
+        q_s = f"{qty:>3}" if qty > 0 else "  —"
+        b_s = f"{bp:>4.2f}" if bp > 0 else "   —"
+        rows.append(
+            f"{short:<12}│{q_s}│{bp:>5.2f}│{sp:>5.2f}│"
+            f"{ds:>+5.1f}%{ds_icon}│{mc:>5.2f}│"
+            f"{dm:>+5.1f}%{dm_icon}")
+
+        total_qty += qty
+        total_buy += bp * qty
+        total_steam += sp * qty
+        total_mc += mc * qty
+
+    net_steam = total_steam * 0.87
+    pnl = net_steam - total_buy
+    pnl_pct = (pnl / total_buy * 100) if total_buy > 0 else 0
+    pnl_emoji = "📈" if pnl >= 0 else "📉"
+
+    header = (
+        f"📈 <b>Дашборд инвестиций CS2</b>\n"
+        f"💰 Вложено: ${total_buy:.2f} ({total_qty} шт)\n"
+        f"💵 Сейчас: ${total_steam:.2f} / "
+        f"${total_mc:.2f}\n"
+        f"{pnl_emoji} PnL: ${pnl:+.2f} ({pnl_pct:+.1f}%)\n"
+        f"🕐 {now}\n")
+
+    hdr = (f"{'':12}│Qty│  Avg│  Stm│   ΔS│   TM│   ΔM")
+    sep = "─" * 12 + "┼" + "─" * 3 + "┼" + "─" * 5 + "┼" + \
+          "─" * 5 + "┼" + "─" * 7 + "┼" + "─" * 5 + "┼" + "─" * 7
+    table = "\n".join([hdr, sep] + rows)
+
+    return f"{header}\n<pre>{table}</pre>"
 
 
 def circles_text() -> str:

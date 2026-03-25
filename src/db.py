@@ -49,6 +49,8 @@ def _init_tables():
             buy_price REAL DEFAULT 0,
             steam_price REAL DEFAULT 0,
             market_csgo_price REAL DEFAULT 0,
+            prev_steam REAL DEFAULT 0,
+            prev_mc REAL DEFAULT 0,
             updated_at REAL DEFAULT 0
         );
     """)
@@ -161,18 +163,26 @@ def save_cs2_investment(name: str, qty: int, buy_price: float,
                         steam_price: float = 0,
                         market_csgo_price: float = 0):
     c = get_conn()
+    # Сохраняем предыдущие цены для Δ
+    old = c.execute(
+        "SELECT steam_price, market_csgo_price FROM cs2_investments "
+        "WHERE name=?", (name,)).fetchone()
+    prev_s = old[0] if old else 0
+    prev_m = old[1] if old else 0
     c.execute(
         """INSERT INTO cs2_investments
            (name, qty, buy_price, steam_price,
-            market_csgo_price, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
+            market_csgo_price, prev_steam, prev_mc, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(name) DO UPDATE SET
            qty=excluded.qty, buy_price=excluded.buy_price,
+           prev_steam=cs2_investments.steam_price,
+           prev_mc=cs2_investments.market_csgo_price,
            steam_price=excluded.steam_price,
            market_csgo_price=excluded.market_csgo_price,
            updated_at=excluded.updated_at""",
         (name, qty, buy_price, steam_price,
-         market_csgo_price, time.time()))
+         market_csgo_price, prev_s, prev_m, time.time()))
     c.commit()
 
 
