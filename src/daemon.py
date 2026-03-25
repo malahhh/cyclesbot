@@ -14,9 +14,9 @@ log = logging.getLogger("invest")
 
 _thread = None
 
-# Интервал обновления: 18-30 часов (рандом для каждого аккаунта)
-MIN_INTERVAL = 18 * 3600
-MAX_INTERVAL = 30 * 3600
+# Интервал обновления: 12-24 часа (рандом для каждого аккаунта)
+MIN_INTERVAL = 12 * 3600
+MAX_INTERVAL = 24 * 3600
 
 # {steam_id: next_update_timestamp}
 _schedules: dict[str, float] = {}
