@@ -1,4 +1,9 @@
-"""Investment Bot — SQLite БД."""
+"""Investment Bot — SQLite БД.
+
+Две раздельные таблицы:
+- invest_accounts — долгосрочное хранение (раздел Инвестиции)
+- circle_accounts — быстрый оборот (раздел Круги)
+"""
 
 import sqlite3
 import time
@@ -22,80 +27,106 @@ def get_conn() -> sqlite3.Connection:
 def _init_tables():
     c = get_conn()
     c.executescript("""
-        CREATE TABLE IF NOT EXISTS accounts (
+        -- Инвестиции: долгосрочное хранение
+        CREATE TABLE IF NOT EXISTS invest_accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             login TEXT UNIQUE NOT NULL,
+            steam_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Круги: быстрый оборот
+        CREATE TABLE IF NOT EXISTS circle_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            login TEXT NOT NULL,
             steam_id TEXT NOT NULL,
             amount TEXT DEFAULT '',
             scheme TEXT DEFAULT '',
             status TEXT DEFAULT 'buy',
-            checked_at TEXT DEFAULT '',
             check_note TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Кэш инвентарей (общий, ключ = steam_id + app_id)
         CREATE TABLE IF NOT EXISTS inventory_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_id INTEGER REFERENCES accounts(id),
+            steam_id TEXT NOT NULL,
             app_id INTEGER NOT NULL,
             items_count INTEGER DEFAULT 0,
             items_json TEXT DEFAULT '[]',
             total_value REAL DEFAULT 0,
             updated_at REAL DEFAULT 0,
-            UNIQUE(account_id, app_id)
-        );
-        CREATE TABLE IF NOT EXISTS cs2_investments (
-            name TEXT PRIMARY KEY,
-            qty INTEGER DEFAULT 0,
-            buy_price REAL DEFAULT 0,
-            steam_price REAL DEFAULT 0,
-            market_csgo_price REAL DEFAULT 0,
-            prev_steam REAL DEFAULT 0,
-            prev_mc REAL DEFAULT 0,
-            updated_at REAL DEFAULT 0
+            UNIQUE(steam_id, app_id)
         );
     """)
     c.commit()
 
 
 # ============================================================
-# Accounts CRUD
+# Invest accounts (Инвестиции)
 # ============================================================
-def get_accounts() -> list:
+def get_invest_accounts() -> list:
     return [dict(r) for r in get_conn().execute(
-        "SELECT * FROM accounts ORDER BY id").fetchall()]
+        "SELECT * FROM invest_accounts ORDER BY id").fetchall()]
 
 
-def get_account(account_id: int) -> dict:
+def get_invest_account(aid: int) -> dict:
     r = get_conn().execute(
-        "SELECT * FROM accounts WHERE id=?", (account_id,)
+        "SELECT * FROM invest_accounts WHERE id=?", (aid,)
     ).fetchone()
     return dict(r) if r else {}
 
 
-def get_account_by_login(login: str) -> dict:
-    r = get_conn().execute(
-        "SELECT * FROM accounts WHERE login=?", (login,)
-    ).fetchone()
-    return dict(r) if r else {}
-
-
-def add_account(login: str, steam_id: str, **kw) -> int:
+def add_invest_account(login: str, steam_id: str) -> int:
     c = get_conn()
-    c.execute(
-        """INSERT INTO accounts
-           (login, steam_id, amount, scheme, status,
-            checked_at, check_note)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (login, steam_id, kw.get("amount", ""),
-         kw.get("scheme", ""), kw.get("status", "buy"),
-         kw.get("checked_at", ""), kw.get("check_note", "")))
+    c.execute("INSERT INTO invest_accounts (login, steam_id) "
+              "VALUES (?, ?)", (login, steam_id))
     c.commit()
     return c.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
-def update_account(account_id: int, **fields) -> bool:
+def delete_invest_account(aid: int) -> bool:
+    c = get_conn()
+    acc = get_invest_account(aid)
+    if acc:
+        c.execute("DELETE FROM inventory_cache WHERE steam_id=?",
+                  (acc["steam_id"],))
+    c.execute("DELETE FROM invest_accounts WHERE id=?", (aid,))
+    c.commit()
+    return c.total_changes > 0
+
+
+# ============================================================
+# Circle accounts (Круги)
+# ============================================================
+def get_circle_accounts() -> list:
+    return [dict(r) for r in get_conn().execute(
+        "SELECT * FROM circle_accounts ORDER BY id").fetchall()]
+
+
+def get_circle_account(aid: int) -> dict:
+    r = get_conn().execute(
+        "SELECT * FROM circle_accounts WHERE id=?", (aid,)
+    ).fetchone()
+    return dict(r) if r else {}
+
+
+def add_circle_account(login: str, steam_id: str, **kw) -> int:
+    c = get_conn()
+    c.execute(
+        """INSERT INTO circle_accounts
+           (login, steam_id, amount, scheme, status, check_note)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (login, steam_id, kw.get("amount", ""),
+         kw.get("scheme", ""), kw.get("status", "buy"),
+         kw.get("check_note", "")))
+    c.commit()
+    return c.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def update_circle_account(aid: int, **fields) -> bool:
     allowed = {"login", "steam_id", "amount", "scheme",
-               "status", "checked_at", "check_note"}
+               "status", "check_note"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:
@@ -103,90 +134,47 @@ def update_account(account_id: int, **fields) -> bool:
             vals.append(v)
     if not sets:
         return False
-    vals.append(account_id)
+    vals.append(aid)
     c = get_conn()
-    c.execute(f"UPDATE accounts SET {','.join(sets)} WHERE id=?",
-              vals)
+    c.execute(
+        f"UPDATE circle_accounts SET {','.join(sets)} WHERE id=?",
+        vals)
     c.commit()
     return c.total_changes > 0
 
 
-def delete_account(account_id: int) -> bool:
+def delete_circle_account(aid: int) -> bool:
     c = get_conn()
-    c.execute("DELETE FROM inventory_cache WHERE account_id=?",
-              (account_id,))
-    c.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+    c.execute("DELETE FROM circle_accounts WHERE id=?", (aid,))
     c.commit()
     return c.total_changes > 0
 
 
 # ============================================================
-# Inventory cache
+# Inventory cache (общий по steam_id)
 # ============================================================
-def save_inventory(account_id: int, app_id: int,
+def save_inventory(steam_id: str, app_id: int,
                    items_count: int, items_json: str,
                    total_value: float):
     c = get_conn()
     c.execute(
         """INSERT INTO inventory_cache
-           (account_id, app_id, items_count, items_json,
+           (steam_id, app_id, items_count, items_json,
             total_value, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(account_id, app_id) DO UPDATE SET
+           ON CONFLICT(steam_id, app_id) DO UPDATE SET
            items_count=excluded.items_count,
            items_json=excluded.items_json,
            total_value=excluded.total_value,
            updated_at=excluded.updated_at""",
-        (account_id, app_id, items_count, items_json,
+        (steam_id, app_id, items_count, items_json,
          total_value, time.time()))
     c.commit()
 
 
-def get_inventory(account_id: int, app_id: int) -> dict:
+def get_inventory(steam_id: str, app_id: int) -> dict:
     r = get_conn().execute(
         "SELECT * FROM inventory_cache "
-        "WHERE account_id=? AND app_id=?",
-        (account_id, app_id)).fetchone()
+        "WHERE steam_id=? AND app_id=?",
+        (steam_id, app_id)).fetchone()
     return dict(r) if r else {}
-
-
-def get_all_inventories(account_id: int) -> list:
-    return [dict(r) for r in get_conn().execute(
-        "SELECT * FROM inventory_cache WHERE account_id=?",
-        (account_id,)).fetchall()]
-
-
-# ============================================================
-# CS2 investments
-# ============================================================
-def save_cs2_investment(name: str, qty: int, buy_price: float,
-                        steam_price: float = 0,
-                        market_csgo_price: float = 0):
-    c = get_conn()
-    # Сохраняем предыдущие цены для Δ
-    old = c.execute(
-        "SELECT steam_price, market_csgo_price FROM cs2_investments "
-        "WHERE name=?", (name,)).fetchone()
-    prev_s = old[0] if old else 0
-    prev_m = old[1] if old else 0
-    c.execute(
-        """INSERT INTO cs2_investments
-           (name, qty, buy_price, steam_price,
-            market_csgo_price, prev_steam, prev_mc, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(name) DO UPDATE SET
-           qty=excluded.qty, buy_price=excluded.buy_price,
-           prev_steam=cs2_investments.steam_price,
-           prev_mc=cs2_investments.market_csgo_price,
-           steam_price=excluded.steam_price,
-           market_csgo_price=excluded.market_csgo_price,
-           updated_at=excluded.updated_at""",
-        (name, qty, buy_price, steam_price,
-         market_csgo_price, prev_s, prev_m, time.time()))
-    c.commit()
-
-
-def get_cs2_investments() -> list:
-    return [dict(r) for r in get_conn().execute(
-        "SELECT * FROM cs2_investments ORDER BY name"
-    ).fetchall()]

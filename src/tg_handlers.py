@@ -85,13 +85,14 @@ async def cmd_start(update: Update,
     if not _auth(update):
         return
     ctx.user_data.clear()
-    accs = db.get_accounts()
-    active = len([a for a in accs
+    inv_accs = db.get_invest_accounts()
+    cir_accs = db.get_circle_accounts()
+    active = len([a for a in cir_accs
                   if a["status"] in ("buy", "hold")])
-    done = len([a for a in accs if a["status"] == "done"])
+    done = len([a for a in cir_accs if a["status"] == "done"])
     await update.message.reply_text(
         f"📊 <b>Investment Bot</b>\n\n"
-        f"Аккаунтов: {len(accs)}\n"
+        f"Инвестиции: {len(inv_accs)} акк\n"
         f"Активных кругов: {active}\n"
         f"Завершённых: {done}",
         parse_mode="HTML", reply_markup=_main_kb())
@@ -137,13 +138,14 @@ async def on_callback(update: Update,
                                      callback_data="back")]]))
 
     elif data == "back":
-        accs = db.get_accounts()
-        active = len([a for a in accs
+        inv_accs = db.get_invest_accounts()
+        cir_accs = db.get_circle_accounts()
+        active = len([a for a in cir_accs
                       if a["status"] in ("buy", "hold")])
-        done = len([a for a in accs if a["status"] == "done"])
+        done = len([a for a in cir_accs if a["status"] == "done"])
         await q.message.edit_text(
             f"📊 <b>Investment Bot</b>\n\n"
-            f"Аккаунтов: {len(accs)}\n"
+            f"Инвестиции: {len(inv_accs)} акк\n"
             f"Активных кругов: {active}\n"
             f"Завершённых: {done}",
             parse_mode="HTML", reply_markup=_main_kb())
@@ -155,7 +157,7 @@ async def on_callback(update: Update,
         await q.message.edit_text("Введи имя аккаунта:")
 
     elif data == "inv:del_pick":
-        accs = db.get_accounts()
+        accs = db.get_invest_accounts()
         rows = [[InlineKeyboardButton(
             f"🗑 {a['login']}", callback_data=f"inv:del:{a['id']}")]
             for a in accs]
@@ -166,9 +168,9 @@ async def on_callback(update: Update,
 
     elif data.startswith("inv:del:"):
         acc_id = int(data.split(":")[2])
-        acc = db.get_account(acc_id)
+        acc = db.get_invest_account(acc_id)
         if acc:
-            db.delete_account(acc_id)
+            db.delete_invest_account(acc_id)
         await q.message.edit_text(
             f"✅ Удалён: {acc['login'] if acc else '?'}",
             reply_markup=_main_kb())
@@ -203,7 +205,7 @@ async def on_callback(update: Update,
 
     # --- Круги: завершить ---
     elif data == "cir:finish_pick":
-        accs = db.get_accounts()
+        accs = db.get_circle_accounts()
         active = [a for a in accs
                   if a["status"] in ("buy", "hold", "sale")]
         if not active:
@@ -224,7 +226,7 @@ async def on_callback(update: Update,
         acc_id = int(data.split(":")[2])
         ctx.user_data["flow"] = "cir_finish"
         ctx.user_data["finish_acc"] = acc_id
-        acc = db.get_account(acc_id)
+        acc = db.get_circle_account(acc_id)
         await q.message.edit_text(
             f"✅ <b>{acc['login']}</b>\n"
             f"Вложено: {acc['amount']}\n\n"
@@ -233,7 +235,7 @@ async def on_callback(update: Update,
 
     # --- Круги: изменить ---
     elif data == "cir:edit_pick":
-        accs = db.get_accounts()
+        accs = db.get_circle_accounts()
         rows = [[InlineKeyboardButton(
             f"✏️ {a['login']}", callback_data=f"cir:edit:{a['id']}")]
             for a in accs]
@@ -244,7 +246,7 @@ async def on_callback(update: Update,
 
     elif data.startswith("cir:edit:"):
         acc_id = int(data.split(":")[2])
-        acc = db.get_account(acc_id)
+        acc = db.get_circle_account(acc_id)
         if not acc:
             return
         emoji = STATUS_EMOJI.get(acc["status"], "⚪")
@@ -297,7 +299,7 @@ async def on_callback(update: Update,
         field = ctx.user_data.get("edit_field", "status")
         ctx.user_data.clear()
         if acc_id:
-            db.update_account(acc_id, **{field: value})
+            db.update_circle_account(acc_id, **{field: value})
         await q.message.edit_text(
             "✅ Обновлено", reply_markup=_main_kb())
 
@@ -323,7 +325,7 @@ async def handle_text(update: Update,
             login = ctx.user_data.pop("add_login", "")
             ctx.user_data.clear()
             if login and text:
-                db.add_account(login, text)
+                db.add_invest_account(login, text)
                 await update.message.reply_text(
                     f"✅ Добавлен: {login}",
                     reply_markup=_main_kb())
@@ -349,8 +351,8 @@ async def handle_text(update: Update,
             scheme = text
             ctx.user_data.clear()
             if login and steam_id:
-                db.add_account(login, steam_id,
-                               amount=amount, scheme=scheme)
+                db.add_circle_account(login, steam_id,
+                                      amount=amount, scheme=scheme)
                 await update.message.reply_text(
                     f"✅ Круг создан: {login} | {amount}",
                     reply_markup=_main_kb())
@@ -361,7 +363,7 @@ async def handle_text(update: Update,
         ctx.user_data.clear()
         if not acc_id:
             return
-        acc = db.get_account(acc_id)
+        acc = db.get_circle_account(acc_id)
         if not acc:
             return
         try:
@@ -378,7 +380,7 @@ async def handle_text(update: Update,
         profit = withdrawn - invested
         roi = (profit / invested * 100) if invested > 0 else 0
         emoji = "📈" if profit >= 0 else "📉"
-        db.update_account(
+        db.update_circle_account(
             acc_id, status="done",
             check_note=f"Вывод: ${withdrawn:.2f}, "
                        f"P/L: ${profit:+.2f} ({roi:+.1f}%)")
@@ -395,7 +397,7 @@ async def handle_text(update: Update,
         field = ctx.user_data.get("edit_field")
         ctx.user_data.clear()
         if acc_id and field:
-            db.update_account(acc_id, **{field: text})
+            db.update_circle_account(acc_id, **{field: text})
             await update.message.reply_text(
                 "✅ Обновлено", reply_markup=_main_kb())
 

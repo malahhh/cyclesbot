@@ -16,11 +16,8 @@ _thread = None
 INTERVAL = 24 * 3600  # раз в сутки
 
 
-def update_account(acc: dict):
-    """Обновить инвентарь одного аккаунта."""
-    steam_id = acc["steam_id"]
-    acc_id = acc["id"]
-
+def update_steam_account(steam_id: str, login: str):
+    """Обновить инвентарь одного аккаунта по steam_id."""
     for app_id in (730, 570):
         items = inventory.get_inventory(steam_id, app_id)
         if not items:
@@ -31,34 +28,39 @@ def update_account(acc: dict):
              for i in items], ensure_ascii=False)
         total_count = sum(i["count"] for i in items)
 
-        db.save_inventory(acc_id, app_id, total_count,
+        db.save_inventory(steam_id, app_id, total_count,
                           items_json, total)
         log.info("  %s app %d: %d items, $%.2f",
-                 acc["login"], app_id, total_count, total)
+                 login, app_id, total_count, total)
 
-        # Задержка между CS2 и Dota2
         time.sleep(random.uniform(3.0, 8.0))
 
 
 def run_update():
-    """Один цикл: обновить все аккаунты."""
-    accounts = db.get_accounts()
+    """Один цикл: обновить invest_accounts."""
+    accounts = db.get_invest_accounts()
     if not accounts:
+        log.info("Нет invest аккаунтов для обновления")
         return
 
-    log.info("Обновление инвентарей: %d аккаунтов", len(accounts))
+    # Уникальные steam_id (один аккаунт может быть и в invest, и в circles)
+    seen = set()
+    to_update = []
     for acc in accounts:
+        if acc["steam_id"] not in seen:
+            seen.add(acc["steam_id"])
+            to_update.append(acc)
+
+    log.info("Обновление инвентарей: %d аккаунтов", len(to_update))
+    for acc in to_update:
         try:
-            update_account(acc)
+            update_steam_account(acc["steam_id"], acc["login"])
         except Exception as e:
             log.error("Inventory update %s: %s", acc["login"], e)
 
-        # Рандомная задержка между аккаунтами
         delay = random.uniform(8.0, 25.0)
         log.info("  Задержка: %.0fс", delay)
         time.sleep(delay)
-
-    # Дашборд обновляется inline в боте, не в канале
 
     log.info("Обновление завершено")
 

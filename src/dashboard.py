@@ -10,15 +10,15 @@ MSK = timezone(timedelta(hours=3))
 STATUS_EMOJI = {"buy": "🟢", "hold": "🟡", "sale": "🟠", "done": "✅"}
 
 
-def _aggregate_inventories() -> list:
-    """Собрать все предметы со всех аккаунтов из inventory_cache."""
+def _aggregate_invest_inventories() -> list:
+    """Собрать предметы с invest_accounts из inventory_cache."""
     import json
-    accs = db.get_accounts()
+    accs = db.get_invest_accounts()
     merged = {}  # name -> total count
 
     for acc in accs:
         for app_id in (730, 570):
-            inv = db.get_inventory(acc["id"], app_id)
+            inv = db.get_inventory(acc["steam_id"], app_id)
             if not inv or not inv.get("items_json"):
                 continue
             try:
@@ -31,11 +31,9 @@ def _aggregate_inventories() -> list:
                 if name and count > 0:
                     merged[name] = merged.get(name, 0) + count
 
-    # Получаем цены из lis-sniper
     import pricing
     names = list(merged.keys())
     prices = pricing.get_price_batch(names, 730)
-    # Для Dota2 тоже
     prices_dota = pricing.get_price_batch(names, 570)
     for n, p in prices_dota.items():
         if n not in prices:
@@ -56,7 +54,7 @@ INVEST_PAGE_SIZE = 30  # строк на страницу
 
 def invest_text(page: int = 0) -> str:
     """Текст раздела Инвестиции — страница page."""
-    items = _aggregate_inventories()
+    items = _aggregate_invest_inventories()
     if not items:
         return "📊 <b>Инвестиции</b>\n\nНет предметов на аккаунтах."
 
@@ -106,13 +104,13 @@ def invest_text(page: int = 0) -> str:
 
 def invest_pages() -> int:
     """Количество страниц инвестиций."""
-    items = _aggregate_inventories()
+    items = _aggregate_invest_inventories()
     return max(1, -(-len(items) // INVEST_PAGE_SIZE))
 
 
 def circles_text() -> str:
     """Текст раздела Круги (активные)."""
-    accs = db.get_accounts()
+    accs = db.get_circle_accounts()
     active = [a for a in accs
               if a["status"] in ("buy", "hold", "sale")]
     if not active:
@@ -125,7 +123,7 @@ def circles_text() -> str:
         emoji = STATUS_EMOJI.get(acc["status"], "⚪")
         inv_parts = []
         for app_id, game in [(730, "CS2"), (570, "Dota2")]:
-            inv = db.get_inventory(acc["id"], app_id)
+            inv = db.get_inventory(acc["steam_id"], app_id)
             if inv and inv["items_count"] > 0:
                 inv_parts.append(
                     f"{game}: {inv['items_count']} "
@@ -154,7 +152,7 @@ def circles_text() -> str:
 
 def history_text() -> str:
     """Текст раздела История (завершённые круги)."""
-    accs = db.get_accounts()
+    accs = db.get_circle_accounts()
     done = [a for a in accs if a["status"] == "done"]
     if not done:
         return "📜 <b>История</b>\n\nНет завершённых кругов."
