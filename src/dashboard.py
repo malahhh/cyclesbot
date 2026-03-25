@@ -146,15 +146,6 @@ def circles_text() -> str:
 
     for acc in active:
         emoji = STATUS_EMOJI.get(acc["status"], "⚪")
-        # Инвентарь
-        inv_parts = []
-        for app_id, game in [(730, "CS2"), (570, "Dota2")]:
-            inv = db.get_inventory(acc["steam_id"], app_id)
-            if inv and inv["items_count"] > 0:
-                inv_parts.append(
-                    f"{game}: {inv['items_count']} | "
-                    f"💵 ≈${inv['total_value']:.2f}")
-        inv_line = " | ".join(inv_parts) if inv_parts else "—"
 
         try:
             amt = float(acc["amount"].replace("$", "")
@@ -163,14 +154,25 @@ def circles_text() -> str:
         except (ValueError, IndexError):
             pass
 
-        card = f"🟦 {acc['login']} | {acc['amount']}\n"
-        card += f"📦 {inv_line}\n"
-        if acc["scheme"]:
-            card += f"🔁 {acc['scheme']}\n"
-        if acc["check_note"]:
-            card += f"⚠️ {acc['check_note']}\n"
-        card += f"{emoji} {acc['status']}\n"
-        card += SEP
+        items_cnt = 0
+        steam_val = 0.0
+        for app_id in (730, 570):
+            inv = db.get_inventory(acc["steam_id"], app_id)
+            if inv and inv["items_count"] > 0:
+                items_cnt += inv["items_count"]
+                steam_val += inv["total_value"]
+        cnt_s = str(items_cnt) if items_cnt else "??"
+        val_s = f"${steam_val:.2f}" if steam_val > 0 else "??"
+
+        card = (
+            f"🟦 Аккаунт: {acc['login']}\n"
+            f"💰 Вложено: {acc['amount'] or '??'}\n"
+            f"📦 Количество предметов: {cnt_s} | "
+            f"💵 Оценка Steam: {val_s}\n"
+            f"🔁 Схема: {acc['scheme'] or '??'}\n"
+            f"⚠️ Статус схемы: {acc['check_note'] or '??'}\n"
+            f"📝 Примечание: {acc['status'] or '??'}\n"
+            f"{SEP}")
         blocks.append(card)
 
     blocks.append(f"\n💰 Вложено: ${total_amount:.0f}")
