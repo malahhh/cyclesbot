@@ -69,6 +69,7 @@ async def cmd_start(update: Update,
                     ctx: ContextTypes.DEFAULT_TYPE):
     if not _auth(update):
         return
+    ctx.user_data.clear()
     accs = db.get_accounts()
     active = len([a for a in accs
                   if a["status"] in ("buy", "hold")])
@@ -127,7 +128,7 @@ async def on_callback(update: Update,
     elif data == "inv:add":
         ctx.user_data["flow"] = "inv_add"
         ctx.user_data["step"] = "login"
-        await q.message.edit_text("Введи логин аккаунта:")
+        await q.message.edit_text("Введи имя аккаунта:")
 
     elif data == "inv:del_pick":
         accs = db.get_accounts()
@@ -160,7 +161,7 @@ async def on_callback(update: Update,
         ctx.user_data["flow"] = "cir_add"
         ctx.user_data["step"] = "login"
         await q.message.edit_text(
-            "Введи логин аккаунта для нового круга:")
+            "Введи имя аккаунта для нового круга:")
 
     # --- Круги: завершить ---
     elif data == "cir:finish_pick":
