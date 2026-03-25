@@ -78,16 +78,13 @@ def _circle_card(acc: dict) -> str:
             total_value += inv["total_value"]
     cnt_s = str(items_count) if items_count else "??"
     val_s = f"${total_value:.2f}" if total_value > 0 else "??"
-    latest_upd = 0
-    for app_id in (730, 570):
-        inv = db.get_inventory(acc["steam_id"], app_id)
-        if inv and inv.get("updated_at", 0) > latest_upd:
-            latest_upd = inv["updated_at"]
-    if latest_upd:
-        from datetime import datetime, timezone, timedelta
-        _MSK = timezone(timedelta(hours=3))
-        next_dt = datetime.fromtimestamp(latest_upd + 24*3600, _MSK)
-        next_s = f"{next_dt.strftime('%d.%m')} ~{next_dt.strftime('%H:00')} МСК"
+    import daemon as _daemon
+    from datetime import datetime, timezone, timedelta
+    _MSK = timezone(timedelta(hours=3))
+    next_ts = _daemon.get_next_update(acc["steam_id"])
+    if next_ts:
+        next_dt = datetime.fromtimestamp(next_ts, _MSK)
+        next_s = f"{next_dt.strftime('%d.%m')} ~{next_dt.strftime('%H:%M')} МСК"
     else:
         next_s = "??"
     return (

@@ -81,12 +81,17 @@ def invest_text(page: int = 0) -> str:
         if parts:
             line = f"• {acc['login']} — {' | '.join(parts)}"
             if latest_upd:
+                import daemon as _daemon
                 upd_dt = datetime.fromtimestamp(latest_upd, MSK)
-                next_dt = datetime.fromtimestamp(
-                    latest_upd + 24 * 3600, MSK)
+                next_ts = _daemon.get_next_update(acc["steam_id"])
+                if next_ts:
+                    next_dt = datetime.fromtimestamp(next_ts, MSK)
+                    next_s = (f"{next_dt.strftime('%d.%m')} "
+                              f"~{next_dt.strftime('%H:%M')}")
+                else:
+                    next_s = "??"
                 line += (f"\n  обновлено {upd_dt.strftime('%d.%m %H:%M')}"
-                         f" | след: {next_dt.strftime('%d.%m')} "
-                         f"~{next_dt.strftime('%H:00')}")
+                         f" | след: {next_s}")
             acc_lines.append(line)
         else:
             acc_lines.append(f"• {acc['login']} — нет данных")
@@ -171,15 +176,11 @@ def circles_text() -> str:
         val_s = f"${steam_val:.2f}" if steam_val > 0 else "??"
 
         # След. обновление
-        latest_upd = 0
-        for app_id in (730, 570):
-            inv = db.get_inventory(acc["steam_id"], app_id)
-            if inv and inv.get("updated_at", 0) > latest_upd:
-                latest_upd = inv["updated_at"]
-        if latest_upd:
-            next_dt = datetime.fromtimestamp(
-                latest_upd + 24 * 3600, MSK)
-            next_s = f"{next_dt.strftime('%d.%m')} ~{next_dt.strftime('%H:00')} МСК"
+        import daemon as _daemon
+        next_ts = _daemon.get_next_update(acc["steam_id"])
+        if next_ts:
+            next_dt = datetime.fromtimestamp(next_ts, MSK)
+            next_s = f"{next_dt.strftime('%d.%m')} ~{next_dt.strftime('%H:%M')} МСК"
         else:
             next_s = "??"
 

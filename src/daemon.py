@@ -1,4 +1,4 @@
-"""Фоновый демон — обновление инвентарей раз в сутки."""
+"""Фоновый демон — индивидуальные таймеры обновления для каждого аккаунта."""
 
 import json
 import logging
@@ -13,7 +13,72 @@ import pricing
 log = logging.getLogger("invest")
 
 _thread = None
-INTERVAL = 24 * 3600  # раз в сутки
+
+# Интервал обновления: 18-30 часов (рандом для каждого аккаунта)
+MIN_INTERVAL = 18 * 3600
+MAX_INTERVAL = 30 * 3600
+
+# {steam_id: next_update_timestamp}
+_schedules: dict[str, float] = {}
+
+
+def _next_interval() -> float:
+    """Рандомный интервал 18-30 часов."""
+    return random.uniform(MIN_INTERVAL, MAX_INTERVAL)
+
+
+def _init_schedules():
+    """Инициализация расписания: рандомный offset для каждого аккаунта."""
+    all_accounts = _get_all_unique_accounts()
+    now = time.time()
+    offset_min = 60      # минимум 1 минута
+    offset_max = 14400   # максимум 4 часа
+
+    for i, (steam_id, login) in enumerate(all_accounts):
+        if steam_id in _schedules:
+            continue
+        # Проверяем когда последний раз обновлялся
+        latest = 0
+        for app_id in (730, 570):
+            inv = db.get_inventory(steam_id, app_id)
+            if inv and inv.get("updated_at", 0) > latest:
+                latest = inv["updated_at"]
+
+        if latest > 0:
+            # Есть кэш — следующее обновление через 18-30ч от последнего
+            next_at = latest + _next_interval()
+            if next_at < now:
+                # Просрочен — обновить скоро, но с рандомным offset
+                next_at = now + random.uniform(
+                    offset_min + i * 1800,
+                    offset_min + i * 1800 + 3600)
+        else:
+            # Нет кэша — обновить с рандомным offset
+            # Каждый следующий аккаунт позже предыдущего
+            next_at = now + random.uniform(
+                offset_min + i * 3600,
+                offset_max + i * 3600)
+
+        _schedules[steam_id] = next_at
+        eta = (next_at - now) / 3600
+        log.info("  Schedule %s (%s): через %.1f ч", login,
+                 steam_id[:10], eta)
+
+
+def _get_all_unique_accounts() -> list:
+    """Все уникальные (steam_id, login) из invest + circles."""
+    seen = set()
+    result = []
+    for acc in db.get_invest_accounts():
+        if acc["steam_id"] not in seen:
+            seen.add(acc["steam_id"])
+            result.append((acc["steam_id"], acc["login"]))
+    for acc in db.get_circle_accounts():
+        if (acc["steam_id"] not in seen
+                and acc["status"] in ("buy", "hold", "sale")):
+            seen.add(acc["steam_id"])
+            result.append((acc["steam_id"], acc["login"]))
+    return result
 
 
 def update_steam_account(steam_id: str, login: str):
@@ -35,54 +100,60 @@ def update_steam_account(steam_id: str, login: str):
 
         time.sleep(random.uniform(3.0, 8.0))
 
+    # Запланировать следующее обновление
+    _schedules[steam_id] = time.time() + _next_interval()
+    eta = (_schedules[steam_id] - time.time()) / 3600
+    log.info("  %s: след. обновление через %.1f ч", login, eta)
+
+
+def get_next_update(steam_id: str) -> float:
+    """Время следующего обновления для аккаунта (timestamp)."""
+    return _schedules.get(steam_id, 0)
+
 
 def run_update():
-    """Один цикл: обновить invest + circle accounts."""
-    inv_accounts = db.get_invest_accounts()
-    cir_accounts = db.get_circle_accounts()
-    active_cir = [a for a in cir_accounts
-                  if a["status"] in ("buy", "hold", "sale")]
+    """Проверить и обновить аккаунты, у которых пришло время."""
+    _init_schedules()
+    all_accounts = _get_all_unique_accounts()
+    now = time.time()
+    updated = 0
 
-    # Уникальные steam_id
-    seen = set()
-    to_update = []
-    for acc in inv_accounts + active_cir:
-        if acc["steam_id"] not in seen:
-            seen.add(acc["steam_id"])
-            to_update.append(acc)
+    for steam_id, login in all_accounts:
+        next_at = _schedules.get(steam_id, 0)
+        if next_at > now:
+            continue
 
-    if not to_update:
-        log.info("Нет аккаунтов для обновления")
-        return
-
-    log.info("Обновление инвентарей: %d аккаунтов", len(to_update))
-    for acc in to_update:
+        log.info("Обновляю %s...", login)
         try:
-            update_steam_account(acc["steam_id"], acc["login"])
+            update_steam_account(steam_id, login)
+            updated += 1
         except Exception as e:
-            log.error("Inventory update %s: %s", acc["login"], e)
+            log.error("Ошибка %s: %s", login, e)
+            # Retry через 1-2 часа
+            _schedules[steam_id] = now + random.uniform(3600, 7200)
 
+        # Задержка между аккаунтами
         delay = random.uniform(8.0, 25.0)
         log.info("  Задержка: %.0fс", delay)
         time.sleep(delay)
 
-    log.info("Обновление завершено")
+    if updated:
+        log.info("Обновлено: %d аккаунтов", updated)
 
 
 def _loop():
-    """Фоновый цикл."""
-    # Первое обновление через 30с после старта
-    time.sleep(30)
+    """Фоновый цикл — проверка каждые 10 минут."""
+    time.sleep(30)  # старт через 30с
+    _init_schedules()
+
     while True:
         try:
             run_update()
         except Exception as e:
             log.error("Daemon error: %s", e)
-        # Следующее через 24ч (± 1ч рандом)
-        interval = INTERVAL + random.uniform(-3600, 3600)
-        log.info("Следующее обновление через %.1f ч",
-                 interval / 3600)
-        time.sleep(interval)
+
+        # Проверяем каждые 10 минут
+        time.sleep(600)
 
 
 def start():
