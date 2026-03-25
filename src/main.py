@@ -40,8 +40,9 @@ def main():
     log.info("  Investment Bot v1.0")
     log.info("=" * 40)
 
-    accs = db.get_accounts()
-    log.info("Аккаунтов: %d", len(accs))
+    inv = db.get_invest_accounts()
+    cir = db.get_circle_accounts()
+    log.info("Инвестиции: %d, Круги: %d", len(inv), len(cir))
 
     # Фоновый демон
     import daemon
