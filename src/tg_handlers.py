@@ -67,6 +67,44 @@ def _invest_kb(page: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _circle_card(acc: dict) -> str:
+    """Карточка аккаунта круга."""
+    items_count = 0
+    total_value = 0.0
+    for app_id in (730, 570):
+        inv = db.get_inventory(acc["steam_id"], app_id)
+        if inv and inv["items_count"] > 0:
+            items_count += inv["items_count"]
+            total_value += inv["total_value"]
+    return (
+        f"🟦 Аккаунт: <b>{acc['login']}</b>\n"
+        f"💰 Вложено: {acc['amount'] or '—'}\n"
+        f"📦 Предметов: {items_count} | "
+        f"💵 Оценка: ${total_value:.2f}\n"
+        f"🔁 Схема: {acc['scheme'] or '—'}\n"
+        f"⚠️ Статус схемы: {acc['check_note'] or '—'}\n"
+        f"📝 Примечание: {acc['status']}")
+
+
+def _circle_card_kb(acc_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Сумма",
+                              callback_data=f"ef:{acc_id}:amount"),
+         InlineKeyboardButton("✏️ Схема",
+                              callback_data=f"ef:{acc_id}:scheme")],
+        [InlineKeyboardButton("✏️ Статус",
+                              callback_data=f"ef:{acc_id}:status"),
+         InlineKeyboardButton("✏️ Примечание",
+                              callback_data=f"ef:{acc_id}:check_note")],
+        [InlineKeyboardButton("🔄 Обновить",
+                              callback_data=f"cir:ref:{acc_id}"),
+         InlineKeyboardButton("✅ Завершить",
+                              callback_data=f"cir:fin:{acc_id}")],
+        [InlineKeyboardButton("🔙 Назад",
+                              callback_data="sec:circles")],
+    ])
+
+
 def _circles_kb() -> InlineKeyboardMarkup:
     accs = db.get_circle_accounts()
     active = [a for a in accs
@@ -221,41 +259,10 @@ async def on_callback(update: Update,
         acc = db.get_circle_account(acc_id)
         if not acc:
             return
-        emoji = STATUS_EMOJI.get(acc["status"], "⚪")
-        # Инвентарь
-        inv_parts = []
-        for app_id, game in [(730, "CS2"), (570, "Dota2")]:
-            inv = db.get_inventory(acc["steam_id"], app_id)
-            if inv and inv["items_count"] > 0:
-                inv_parts.append(
-                    f"{game}: {inv['items_count']} шт "
-                    f"(${inv['total_value']:.2f})")
-        inv_line = " | ".join(inv_parts) if inv_parts else "нет данных"
-
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💰 Сумма",
-                                  callback_data=f"ef:{acc_id}:amount"),
-             InlineKeyboardButton("🔄 Схема",
-                                  callback_data=f"ef:{acc_id}:scheme")],
-            [InlineKeyboardButton("📋 Статус",
-                                  callback_data=f"ef:{acc_id}:status"),
-             InlineKeyboardButton("📝 Заметка",
-                                  callback_data=f"ef:{acc_id}:check_note")],
-            [InlineKeyboardButton("🔄 Обновить инвентарь",
-                                  callback_data=f"cir:ref:{acc_id}")],
-            [InlineKeyboardButton("✅ Завершить круг",
-                                  callback_data=f"cir:fin:{acc_id}")],
-            [InlineKeyboardButton("🔙 Назад",
-                                  callback_data="sec:circles")],
-        ])
-        await q.message.edit_text(
-            f"{emoji} <b>{acc['login']}</b>\n\n"
-            f"💰 Сумма: {acc['amount']}\n"
-            f"🔄 Схема: {acc['scheme']}\n"
-            f"📦 Инвентарь: {inv_line}\n"
-            f"📋 Заметка: {acc['check_note'] or '—'}\n"
-            f"📊 Статус: {acc['status']}",
-            parse_mode="HTML", reply_markup=kb)
+        text = _circle_card(acc)
+        kb = _circle_card_kb(acc_id)
+        await q.message.edit_text(text, parse_mode="HTML",
+                                  reply_markup=kb)
 
     elif data.startswith("cir:ref:"):
         acc_id = int(data.split(":")[2])
@@ -270,30 +277,12 @@ async def on_callback(update: Update,
         bot = ctx.bot
         loop = asyncio.get_event_loop()
 
-        def _do_cir(a=acc):
+        def _do_cir(a=acc, aid=acc_id):
             import daemon
             daemon.update_steam_account(a["steam_id"], a["login"])
-            # Показать обновлённую карточку
-            inv_parts = []
-            for app_id, game in [(730, "CS2"), (570, "Dota2")]:
-                inv = db.get_inventory(a["steam_id"], app_id)
-                if inv and inv["items_count"] > 0:
-                    inv_parts.append(
-                        f"{game}: {inv['items_count']} шт "
-                        f"(${inv['total_value']:.2f})")
-            inv_line = " | ".join(inv_parts) if inv_parts else "—"
-            e = STATUS_EMOJI.get(a["status"], "⚪")
-            text = (
-                f"{e} <b>{a['login']}</b>\n\n"
-                f"💰 Сумма: {a['amount']}\n"
-                f"🔄 Схема: {a['scheme']}\n"
-                f"📦 Инвентарь: {inv_line}\n"
-                f"📋 Заметка: {a['check_note'] or '—'}\n"
-                f"📊 Статус: {a['status']}\n\n"
-                f"✅ Инвентарь обновлён")
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад",
-                                     callback_data="sec:circles")]])
+            fresh = db.get_circle_account(aid)
+            text = _circle_card(fresh) + "\n\n✅ Инвентарь обновлён"
+            kb = _circle_card_kb(aid)
             asyncio.run_coroutine_threadsafe(
                 bot.edit_message_text(
                     text, chat_id=chat_id, message_id=msg_id,
@@ -333,7 +322,7 @@ async def on_callback(update: Update,
             await q.message.edit_text("Статус:", reply_markup=kb)
         else:
             labels = {"amount": "сумму", "scheme": "схему",
-                      "check_note": "заметку"}
+                      "check_note": "статус схемы"}
             await q.message.edit_text(
                 f"Введи {labels.get(field, field)}:")
 
