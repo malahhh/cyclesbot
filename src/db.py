@@ -64,6 +64,15 @@ def _init_tables():
             steam_id TEXT PRIMARY KEY,
             next_update_at REAL DEFAULT 0
         );
+
+        -- Привязка прокси к аккаунтам
+        CREATE TABLE IF NOT EXISTS proxy_bindings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_login TEXT UNIQUE NOT NULL,
+            proxy_id INTEGER NOT NULL,
+            comment TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     c.commit()
 
@@ -202,3 +211,60 @@ def get_inventory(steam_id: str, app_id: int) -> dict:
         "WHERE steam_id=? AND app_id=?",
         (steam_id, app_id)).fetchone()
     return dict(r) if r else {}
+
+
+# ============================================================
+# Proxy bindings
+# ============================================================
+def bind_proxy(account_login: str, proxy_id: int,
+               comment: str = "") -> int:
+    c = get_conn()
+    c.execute(
+        """INSERT INTO proxy_bindings (account_login, proxy_id, comment)
+           VALUES (?, ?, ?)
+           ON CONFLICT(account_login) DO UPDATE SET
+           proxy_id=excluded.proxy_id,
+           comment=excluded.comment""",
+        (account_login, proxy_id, comment))
+    c.commit()
+    return c.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def unbind_proxy(account_login: str) -> bool:
+    c = get_conn()
+    c.execute("DELETE FROM proxy_bindings WHERE account_login=?",
+              (account_login,))
+    c.commit()
+    return c.total_changes > 0
+
+
+def get_proxy_binding(account_login: str) -> dict:
+    r = get_conn().execute(
+        "SELECT * FROM proxy_bindings WHERE account_login=?",
+        (account_login,)).fetchone()
+    return dict(r) if r else {}
+
+
+def get_all_proxy_bindings() -> list:
+    return [dict(r) for r in get_conn().execute(
+        "SELECT * FROM proxy_bindings ORDER BY id").fetchall()]
+
+
+def get_setting(key: str) -> str | None:
+    c = get_conn()
+    c.execute("""CREATE TABLE IF NOT EXISTS settings
+                 (key TEXT PRIMARY KEY, value TEXT)""")
+    r = c.execute("SELECT value FROM settings WHERE key=?",
+                  (key,)).fetchone()
+    return r[0] if r else None
+
+
+def set_setting(key: str, value: str):
+    c = get_conn()
+    c.execute("""CREATE TABLE IF NOT EXISTS settings
+                 (key TEXT PRIMARY KEY, value TEXT)""")
+    c.execute("""INSERT INTO settings (key, value)
+                 VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+              (key, value))
+    c.commit()

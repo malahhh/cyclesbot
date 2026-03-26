@@ -31,7 +31,8 @@ def _main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [[KeyboardButton("📊 Инвестиции"),
           KeyboardButton("🔄 Круги")],
-         [KeyboardButton("📜 История")]],
+         [KeyboardButton("🌐 Прокси"),
+          KeyboardButton("📜 История")]],
         resize_keyboard=True)
 
 
@@ -166,8 +167,14 @@ async def on_callback(update: Update,
     await q.answer()
     data = q.data
 
+    # --- Прокси ---
+    if data.startswith("px:"):
+        import tg_proxy
+        await tg_proxy.on_proxy_callback(q, data, ctx)
+        return
+
     # --- Главное меню ---
-    if data == "sec:invest":
+    elif data == "sec:invest":
         await q.message.edit_text(
             dashboard.invest_text(0), parse_mode="HTML",
             reply_markup=_invest_kb(0))
@@ -416,6 +423,12 @@ async def handle_text(update: Update,
             dashboard.circles_text(), parse_mode="HTML",
             reply_markup=_circles_kb())
         return
+    elif text == "🌐 Прокси":
+        ctx.user_data.clear()
+        import tg_proxy
+        await tg_proxy.show_proxy_section(update, ctx)
+        return
+
     elif text == "📜 История":
         ctx.user_data.clear()
         await update.message.reply_text(
@@ -424,6 +437,13 @@ async def handle_text(update: Update,
                 InlineKeyboardButton("🔙 Назад",
                                      callback_data="back")]]))
         return
+
+    # --- Прокси flows ---
+    if ctx.user_data.get("flow", "").startswith("px_"):
+        import tg_proxy
+        handled = await tg_proxy.handle_proxy_text(update, ctx)
+        if handled:
+            return
 
     flow = ctx.user_data.get("flow")
     step = ctx.user_data.get("step")

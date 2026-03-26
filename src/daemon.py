@@ -125,12 +125,117 @@ def run_update():
         log.info("Обновлено: %d аккаунтов", updated)
 
 
+def _check_day_alerts():
+    """Уведомления СТРОГО на 7 и 14 дней работы круга (== не >=)."""
+    from datetime import datetime
+    circles = db.get_circle_accounts()
+    now = datetime.now()
+
+    for milestone in (7, 14):
+        key = f"alerted_{milestone}day"
+        alerted = db.get_setting(key) or ""
+        alerted_set = set(alerted.split(",")) if alerted else set()
+
+        for acc in circles:
+            if acc["status"] not in ("buy", "hold", "sale"):
+                continue
+            login = acc["login"]
+            if login in alerted_set:
+                continue
+            created = acc.get("created_at", "")
+            if not created:
+                continue
+            try:
+                ct = datetime.fromisoformat(str(created))
+                days = (now - ct).days
+                if days == milestone:
+                    _send_alert(
+                        f"⚠️ Аккаунт <b>{login}</b> "
+                        f"в работе уже {milestone} дней!")
+                    alerted_set.add(login)
+                    db.set_setting(key,
+                                   ",".join(alerted_set))
+            except Exception:
+                pass
+
+
+def _send_alert(text: str):
+    """Отправить уведомление в Telegram."""
+    import httpx
+    import config
+    try:
+        httpx.post(
+            f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}"
+            f"/sendMessage",
+            json={"chat_id": config.AUTHORIZED_USER,
+                  "text": text, "parse_mode": "HTML"},
+            timeout=10)
+    except Exception as e:
+        log.error("Alert send error: %s", e)
+
+
+def _check_proxy_expiry():
+    """Алерт за 3 дня до истечения прокси."""
+    from datetime import datetime
+    bindings = db.get_all_proxy_bindings()
+    if not bindings:
+        return
+
+    alerted = db.get_setting("proxy_expiry_alerted") or ""
+    alerted_set = set(alerted.split(",")) if alerted else set()
+
+    try:
+        import httpx as _httpx
+        from config import PROXYLINE_API_KEY
+        headers = {"Authorization": f"Token {PROXYLINE_API_KEY}"}
+        r = _httpx.get("https://panel.proxyline.net/api/proxies/",
+                       headers=headers, timeout=15)
+        proxies = r.json()
+        if isinstance(proxies, dict):
+            proxies = proxies.get("results", [])
+    except Exception as e:
+        log.error("Proxy expiry check: %s", e)
+        return
+
+    proxy_map = {p["id"]: p for p in proxies}
+
+    for b in bindings:
+        login = b["account_login"]
+        proxy = proxy_map.get(b["proxy_id"])
+        if not proxy:
+            continue
+        date_end = proxy.get("date_end", "")
+        if not date_end:
+            continue
+        try:
+            end = datetime.fromisoformat(
+                date_end.replace("Z", "+00:00"))
+            now = datetime.now(end.tzinfo)
+            days_left = (end - now).days
+        except Exception:
+            continue
+
+        alert_key = f"{login}_{days_left}"
+        if days_left <= 3 and days_left >= 0 and alert_key not in alerted_set:
+            ip = proxy.get("ip", "?")
+            _send_alert(
+                f"⚠️ Прокси <b>{login}</b> ({ip}) "
+                f"истекает через {days_left} дн!")
+            alerted_set.add(alert_key)
+            db.set_setting("proxy_expiry_alerted",
+                           ",".join(alerted_set))
+
+
 def _loop():
     time.sleep(30)
     _init_schedules()
+    _check_day_alerts()
+    _check_proxy_expiry()
     while True:
         try:
             run_update()
+            _check_day_alerts()
+            _check_proxy_expiry()
         except Exception as e:
             log.error("Daemon error: %s", e)
         time.sleep(600)

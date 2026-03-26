@@ -190,16 +190,33 @@ def circles_text() -> str:
         else:
             next_s = "??"
 
+        # Дата создания круга + длительность
+        created = acc.get('created_at', '')
+        if created:
+            try:
+                from datetime import datetime as _dt
+                ct = _dt.fromisoformat(str(created).replace('Z', '+00:00'))
+                created_s = ct.strftime('%d.%m.%Y')
+                days = (datetime.now() - ct.replace(tzinfo=None)).days
+                duration_s = f" ({days} дн.)"
+            except Exception:
+                created_s = str(created)[:10]
+                duration_s = ""
+        else:
+            created_s = '??'
+            duration_s = ""
+
         card = (
             f"🟦 Круг #{acc['id']} — Аккаунт: {acc['login']}\n"
+            f"📅 Создан: {created_s}{duration_s}\n"
             f"💰 Вложено: {acc['amount'] or '??'}\n"
             f"📦 Количество предметов: {cnt_s} | "
             f"💵 Оценка Steam: {val_s}\n"
             f"🔁 Схема: {acc['scheme'] or '??'}\n"
             f"⚠️ Статус схемы: {acc['check_note'] or '??'}\n"
             f"📝 Примечание: {acc['status'] or '??'}\n"
-            f"🕐 След. обновление: {next_s}\n\n"
-            f"{SEP}\n")
+            f"🕐 След. обновление: {next_s}\n"
+            f"\n{SEP}\n\n")
         blocks.append(card)
 
     blocks.append(f"\n💰 Вложено: ${total_amount:.0f}")

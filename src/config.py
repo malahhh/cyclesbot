@@ -14,3 +14,5 @@ SNIPER_DB_PATH = os.getenv("SNIPER_DB_PATH",
     "lis-sniper/sniper.db")
 DB_PATH = str(ROOT_DIR / "investment.db")
 AUTHORIZED_USER = int(TELEGRAM_CHAT_ID)
+PROXYLINE_API_KEY = os.getenv("PROXYLINE_API_KEY",
+    "k5emms8u35ztg4b1c445atk0q33pbhmt955vx46g")
