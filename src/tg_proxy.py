@@ -51,20 +51,66 @@ def _days_left(date_end: str) -> int:
 
 
 def _proxy_kb() -> InlineKeyboardMarkup:
+    """Главное меню Прокси (без скрытия)."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Привязать",
                               callback_data="px:bind"),
          InlineKeyboardButton("ℹ️ Инфо",
                               callback_data="px:info_pick")],
-        [InlineKeyboardButton("🙈 Скрыть",
-                              callback_data="px:hide_pick"),
-         InlineKeyboardButton("👁️ Скрытые",
-                              callback_data="px:hidden_list")],
         [InlineKeyboardButton("🔓 IP авторизация",
                               callback_data="px:ip_pick"),
          InlineKeyboardButton("📊 Статус всех",
                               callback_data="px:status")],
     ])
+
+
+def _status_kb() -> InlineKeyboardMarkup:
+    """Меню раздела "Статус всех" (с кнопками скрытия)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🙈 Скрыть",
+                              callback_data="px:hide_pick"),
+         InlineKeyboardButton("👁️ Скрытые",
+                              callback_data="px:hidden_list")],
+        [InlineKeyboardButton("🔙 Назад",
+                              callback_data="px:back")],
+    ])
+
+
+async def show_proxy_section_from_callback(q):
+    """Показать главное меню Прокси из callback (для 🔙 Назад)."""
+    bindings = db.get_all_proxy_bindings()
+    proxies = await _get_proxies()
+    lines = ["🌐 <b>Прокси</b>\n"]
+    all_logins = _all_logins()
+    binding_map = {b["account_login"]: b for b in bindings}
+
+    for login in all_logins:
+        b = binding_map.get(login)
+        if b:
+            proxy = _find_proxy(proxies, b["proxy_id"])
+            if proxy:
+                ip = proxy.get("ip", "?")
+                port = proxy.get("port_http", "?")
+                country = proxy.get("country_name", "?")
+                date_end = proxy.get("date_end", "")[:10]
+                lines.append(
+                    f"🟦 {login} — {ip}:{port} "
+                    f"({country}) — до {date_end}")
+            else:
+                lines.append(
+                    f"🟦 {login} — #{b['proxy_id']} (?)")
+        else:
+            lines.append(f"🟦 {login} — нет прокси")
+
+    try:
+        bal = await proxyline.get_balance()
+        lines.append(f"\n💵 Баланс: ${bal:.2f}")
+    except Exception:
+        pass
+
+    await q.message.edit_text(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=_proxy_kb())
 
 
 async def show_proxy_section(update: Update,
@@ -382,44 +428,11 @@ async def on_proxy_callback(q, data: str,
         
         await q.message.edit_text(
             "\n".join(lines), parse_mode="HTML",
-            reply_markup=_proxy_kb())
+            reply_markup=_status_kb())
 
-    # --- Назад ---
+    # --- Назад в главное меню ---
     elif data == "px:back":
-        # Пересоздаём текст
-        bindings = db.get_all_proxy_bindings()
-        proxies = await _get_proxies()
-        lines = ["🌐 <b>Прокси</b>\n"]
-        all_logins = _all_logins()
-        binding_map = {b["account_login"]: b for b in bindings}
-
-        for login in all_logins:
-            b = binding_map.get(login)
-            if b:
-                proxy = _find_proxy(proxies, b["proxy_id"])
-                if proxy:
-                    ip = proxy.get("ip", "?")
-                    port = proxy.get("port_http", "?")
-                    country = proxy.get("country_name", "?")
-                    date_end = proxy.get("date_end", "")[:10]
-                    lines.append(
-                        f"🟦 {login} — {ip}:{port} "
-                        f"({country}) — до {date_end}")
-                else:
-                    lines.append(
-                        f"🟦 {login} — #{b['proxy_id']} (?)")
-            else:
-                lines.append(f"🟦 {login} — нет прокси")
-
-        try:
-            bal = await proxyline.get_balance()
-            lines.append(f"\n💵 Баланс: ${bal:.2f}")
-        except Exception:
-            pass
-
-        await q.message.edit_text(
-            "\n".join(lines), parse_mode="HTML",
-            reply_markup=_proxy_kb())
+        await show_proxy_section_from_callback(q)
 
 
 async def handle_proxy_text(update: Update,
