@@ -199,23 +199,40 @@ async def on_proxy_callback(q, data: str,
 
     # --- Скрыть прокси ---
     elif data == "px:hide_pick":
-        bindings = db.get_all_proxy_bindings()
         proxies = await _get_proxies()
-        if not bindings:
+        bindings = db.get_all_proxy_bindings()
+        hidden_ids = {h["proxy_id"]
+                      for h in db.get_hidden_proxies()}
+        bind_map = {b["proxy_id"]: b["account_login"]
+                    for b in bindings}
+        
+        if not proxies:
             await q.message.edit_text(
-                "Нет привязанных прокси.",
+                "Нет прокси на Proxyline.",
                 reply_markup=_proxy_kb())
             return
+        
         rows = []
-        for b in bindings:
-            proxy = _find_proxy(proxies, b["proxy_id"])
-            ip = proxy.get("ip", "?") if proxy else "?"
-            btn_text = f"🙈 {b['account_login']} ({ip})"
+        for proxy in proxies:
+            pid = proxy.get("id", 0)
+            if pid in hidden_ids:
+                continue
+            ip = proxy.get("ip", "?")
+            bound = bind_map.get(pid, "")
+            bound_s = f" → {bound}" if bound else ""
+            btn_text = f"{ip}{bound_s}"
             rows.append([InlineKeyboardButton(
                 btn_text,
-                callback_data=f"px:hide:{b['proxy_id']}")])
+                callback_data=f"px:hide:{pid}")])
+        
+        if not rows:
+            await q.message.edit_text(
+                "Все прокси скрыты.",
+                reply_markup=_proxy_kb())
+            return
+        
         rows.append([InlineKeyboardButton(
-            "🔙", callback_data="px:back")])
+            "🔙", callback_data="px:status")])
         await q.message.edit_text(
             "Выбери прокси для скрытия:",
             reply_markup=InlineKeyboardMarkup(rows))
@@ -391,33 +408,39 @@ async def on_proxy_callback(q, data: str,
         proxies = await _get_proxies()
         hidden_ids = {h["proxy_id"]
                       for h in db.get_hidden_proxies()}
+        bind_map = {b["proxy_id"]: b["account_login"]
+                    for b in bindings}
         
         lines = ["📊 <b>Статус видимых прокси</b>\n"]
+        shown = 0
         
-        for b in bindings:
-            if b["proxy_id"] in hidden_ids:
-                continue
-            proxy = _find_proxy(proxies, b["proxy_id"])
-            if not proxy:
+        for proxy in proxies:
+            pid = proxy.get("id", 0)
+            if pid in hidden_ids:
                 continue
             
             ip = proxy.get("ip", "?")
             port = proxy.get("port_http", "?")
-            user = proxy.get("user", "?")
+            user = proxy.get("username", "?")
             password = proxy.get("password", "?")
-            country = proxy.get("country_name",
-                                proxy.get("country", "?"))
+            country = proxy.get("country", "?").upper()
             date_end = proxy.get("date_end", "")
             days = _days_left(date_end)
             
-            warn = " ⚠️" if 0 < days <= 3 else ""
+            if days > 7:
+                sq = "🟩"
+            elif days > 3:
+                sq = "🟧"
+            else:
+                sq = "🟥"
+            
+            bound = bind_map.get(pid, "")
+            acc_s = f" → {bound}" if bound else ""
             lines.append(
-                f"🟦 {b['account_login']}: "
-                f"{ip}:{port} ({country}) "
-                f"до {date_end[:10]} {days}д{warn}")
+                f"{sq} {ip}:{port}:{user}:{password} ({country}) {days}д{acc_s}")
+            shown += 1
         
-        if not any(b["proxy_id"] not in hidden_ids
-                   for b in bindings):
+        if shown == 0:
             lines.append("Все прокси скрыты.")
         
         try:

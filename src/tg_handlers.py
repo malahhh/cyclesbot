@@ -410,16 +410,6 @@ async def handle_text(update: Update,
         return
     text = update.message.text.strip()
 
-    # --- Автообновление при снятии трейдбана от Lisbot ---
-    user = update.message.from_user
-    if user and (user.username == "lisbot" or
-                 user.username == "Lisssggdb" or
-                 "lis" in (user.username or "").lower()):
-        import auto_update
-        handled = await auto_update.handle_lisbot_message(text)
-        if handled:
-            return
-
     # --- Постоянные кнопки меню ---
     if text == "📊 Инвестиции":
         ctx.user_data.clear()
