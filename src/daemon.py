@@ -231,11 +231,15 @@ def _loop():
     _init_schedules()
     _check_day_alerts()
     _check_proxy_expiry()
+    _last_proxy_check = time.time()
     while True:
         try:
             run_update()
             _check_day_alerts()
-            _check_proxy_expiry()
+            # Прокси — раз в 4 часа
+            if time.time() - _last_proxy_check >= 4 * 3600:
+                _check_proxy_expiry()
+                _last_proxy_check = time.time()
         except Exception as e:
             log.error("Daemon error: %s", e)
         time.sleep(600)

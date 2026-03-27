@@ -73,6 +73,12 @@ def _init_tables():
             comment TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Скрытые прокси
+        CREATE TABLE IF NOT EXISTS hidden_proxies (
+            proxy_id INTEGER PRIMARY KEY,
+            hidden_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     c.commit()
 
@@ -248,6 +254,39 @@ def get_proxy_binding(account_login: str) -> dict:
 def get_all_proxy_bindings() -> list:
     return [dict(r) for r in get_conn().execute(
         "SELECT * FROM proxy_bindings ORDER BY id").fetchall()]
+
+
+# ============================================================
+# Hidden proxies
+# ============================================================
+def hide_proxy(proxy_id: int):
+    c = get_conn()
+    c.execute(
+        """INSERT INTO hidden_proxies (proxy_id)
+           VALUES (?) ON CONFLICT(proxy_id) DO NOTHING""",
+        (proxy_id,))
+    c.commit()
+
+
+def unhide_proxy(proxy_id: int) -> bool:
+    c = get_conn()
+    c.execute("DELETE FROM hidden_proxies WHERE proxy_id=?",
+              (proxy_id,))
+    c.commit()
+    return c.total_changes > 0
+
+
+def is_proxy_hidden(proxy_id: int) -> bool:
+    r = get_conn().execute(
+        "SELECT 1 FROM hidden_proxies WHERE proxy_id=?",
+        (proxy_id,)).fetchone()
+    return r is not None
+
+
+def get_hidden_proxies() -> list:
+    return [dict(r) for r in get_conn().execute(
+        "SELECT * FROM hidden_proxies ORDER BY hidden_at DESC"
+    ).fetchall()]
 
 
 def get_setting(key: str) -> str | None:

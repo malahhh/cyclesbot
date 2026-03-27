@@ -10,21 +10,22 @@ from config import PROXYLINE_API_KEY
 log = logging.getLogger("invest")
 
 BASE = "https://panel.proxyline.net/api/"
-HEADERS = {"Authorization": f"Token {PROXYLINE_API_KEY}"}
 
 
 async def _get(endpoint: str, params: dict = None) -> dict:
+    p = params or {}
+    p["api_key"] = PROXYLINE_API_KEY
     async with httpx.AsyncClient() as c:
-        r = await c.get(f"{BASE}{endpoint}", headers=HEADERS,
-                        params=params, timeout=15)
+        r = await c.get(f"{BASE}{endpoint}", params=p, timeout=15)
         r.raise_for_status()
         return r.json()
 
 
 async def _post(endpoint: str, data: dict = None) -> dict:
+    d = data or {}
+    d["api_key"] = PROXYLINE_API_KEY
     async with httpx.AsyncClient() as c:
-        r = await c.post(f"{BASE}{endpoint}", headers=HEADERS,
-                         json=data, timeout=15)
+        r = await c.post(f"{BASE}{endpoint}", data=d, timeout=15)
         r.raise_for_status()
         return r.json()
 
@@ -40,9 +41,13 @@ async def get_proxies() -> list:
 
 
 async def get_proxy(proxy_id: int) -> Optional[dict]:
-    """Детали одного прокси."""
+    """Детали одного прокси (из общего списка)."""
     try:
-        return await _get(f"proxies/{proxy_id}/")
+        proxies = await get_proxies()
+        for p in proxies:
+            if p.get("id") == proxy_id:
+                return p
+        return None
     except Exception as e:
         log.error("get_proxy %d: %s", proxy_id, e)
         return None

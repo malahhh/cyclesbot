@@ -56,6 +56,10 @@ def _proxy_kb() -> InlineKeyboardMarkup:
                               callback_data="px:bind"),
          InlineKeyboardButton("ℹ️ Инфо",
                               callback_data="px:info_pick")],
+        [InlineKeyboardButton("🙈 Скрыть",
+                              callback_data="px:hide_pick"),
+         InlineKeyboardButton("👁️ Скрытые",
+                              callback_data="px:hidden_list")],
         [InlineKeyboardButton("🔓 IP авторизация",
                               callback_data="px:ip_pick"),
          InlineKeyboardButton("📊 Статус всех",
@@ -146,6 +150,84 @@ async def on_proxy_callback(q, data: str,
             f"🔗 Привязка прокси к <b>{login}</b>\n\n"
             f"Введи Proxy ID (число из Proxyline):",
             parse_mode="HTML")
+
+    # --- Скрыть прокси ---
+    elif data == "px:hide_pick":
+        bindings = db.get_all_proxy_bindings()
+        proxies = await _get_proxies()
+        if not bindings:
+            await q.message.edit_text(
+                "Нет привязанных прокси.",
+                reply_markup=_proxy_kb())
+            return
+        rows = []
+        for b in bindings:
+            proxy = _find_proxy(proxies, b["proxy_id"])
+            ip = proxy.get("ip", "?") if proxy else "?"
+            btn_text = f"🙈 {b['account_login']} ({ip})"
+            rows.append([InlineKeyboardButton(
+                btn_text,
+                callback_data=f"px:hide:{b['proxy_id']}")])
+        rows.append([InlineKeyboardButton(
+            "🔙", callback_data="px:back")])
+        await q.message.edit_text(
+            "Выбери прокси для скрытия:",
+            reply_markup=InlineKeyboardMarkup(rows))
+
+    elif data.startswith("px:hide:"):
+        proxy_id = int(data.split(":")[2])
+        db.hide_proxy(proxy_id)
+        await q.message.edit_text(
+            f"✅ Прокси #{proxy_id} скрыт",
+            reply_markup=_proxy_kb())
+
+    # --- Скрытые прокси ---
+    elif data == "px:hidden_list":
+        hidden = db.get_hidden_proxies()
+        proxies = await _get_proxies()
+        bindings = db.get_all_proxy_bindings()
+        
+        if not hidden:
+            await q.message.edit_text(
+                "Нет скрытых прокси.",
+                reply_markup=_proxy_kb())
+            return
+        
+        bind_map = {b["proxy_id"]: b["account_login"]
+                    for b in bindings}
+        proxy_map = {p.get("id"): p for p in proxies}
+        
+        lines = ["👁️ <b>Скрытые прокси</b>\n"]
+        rows = []
+        for h in hidden:
+            pid = h["proxy_id"]
+            proxy = proxy_map.get(pid)
+            b_login = bind_map.get(pid, "не привязан")
+            if proxy:
+                ip = proxy.get("ip", "?")
+                lines.append(f"🟦 {b_login} — {ip}")
+                rows.append([InlineKeyboardButton(
+                    f"👁️ Показать {ip}",
+                    callback_data=f"px:unhide:{pid}")])
+            else:
+                lines.append(f"🟦 #{pid} (удалён из API)")
+                rows.append([InlineKeyboardButton(
+                    f"👁️ #{pid}",
+                    callback_data=f"px:unhide:{pid}")])
+        
+        rows.append([InlineKeyboardButton(
+            "🔙", callback_data="px:back")])
+        
+        await q.message.edit_text(
+            "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(rows))
+
+    elif data.startswith("px:unhide:"):
+        proxy_id = int(data.split(":")[2])
+        db.unhide_proxy(proxy_id)
+        await q.message.edit_text(
+            f"✅ Прокси #{proxy_id} показан",
+            reply_markup=_proxy_kb())
 
     # --- Инфо ---
     elif data == "px:info_pick":
@@ -256,32 +338,48 @@ async def on_proxy_callback(q, data: str,
             f"✅ Прокси отвязан от {login}",
             reply_markup=_proxy_kb())
 
-    # --- Статус всех ---
+    # --- Статус всех (только видимые) ---
     elif data == "px:status":
-        await q.message.edit_text("📊 Проверяю прокси...")
+        await q.message.edit_text("📊 Проверяю видимые прокси...")
         bindings = db.get_all_proxy_bindings()
         proxies = await _get_proxies()
-        lines = ["📊 <b>Статус прокси</b>\n"]
-
+        hidden_ids = {h["proxy_id"]
+                      for h in db.get_hidden_proxies()}
+        
+        lines = ["📊 <b>Статус видимых прокси</b>\n"]
+        
         for b in bindings:
+            if b["proxy_id"] in hidden_ids:
+                continue
             proxy = _find_proxy(proxies, b["proxy_id"])
             if not proxy:
-                lines.append(f"❌ {b['account_login']} — "
-                             f"#{b['proxy_id']} не найден")
                 continue
+            
             ip = proxy.get("ip", "?")
-            port = proxy.get("port_http", 0)
-            days = _days_left(proxy.get("date_end", ""))
-            alive = await proxyline.check_proxy(ip, int(port))
-            status = "✅" if alive else "❌"
-            warn = " ⚠️ ИСТЕКАЕТ!" if 0 < days <= 3 else ""
+            port = proxy.get("port_http", "?")
+            user = proxy.get("user", "?")
+            password = proxy.get("password", "?")
+            country = proxy.get("country_name",
+                                proxy.get("country", "?"))
+            date_end = proxy.get("date_end", "")
+            days = _days_left(date_end)
+            
+            warn = " ⚠️" if 0 < days <= 3 else ""
             lines.append(
-                f"{status} {b['account_login']} — "
-                f"{ip}:{port} ({days}д){warn}")
-
-        if not bindings:
-            lines.append("Нет привязанных прокси.")
-
+                f"🟦 {b['account_login']}: "
+                f"{ip}:{port} ({country}) "
+                f"до {date_end[:10]} {days}д{warn}")
+        
+        if not any(b["proxy_id"] not in hidden_ids
+                   for b in bindings):
+            lines.append("Все прокси скрыты.")
+        
+        try:
+            bal = await proxyline.get_balance()
+            lines.append(f"\n💵 Баланс: ${bal:.2f}")
+        except Exception:
+            pass
+        
         await q.message.edit_text(
             "\n".join(lines), parse_mode="HTML",
             reply_markup=_proxy_kb())
