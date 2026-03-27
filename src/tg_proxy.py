@@ -81,26 +81,43 @@ async def show_proxy_section_from_callback(q):
     bindings = db.get_all_proxy_bindings()
     proxies = await _get_proxies()
     lines = ["🌐 <b>Прокси</b>\n"]
-    all_logins = _all_logins()
     binding_map = {b["account_login"]: b for b in bindings}
 
-    for login in all_logins:
+    def _format_acc(login):
         b = binding_map.get(login)
         if b:
             proxy = _find_proxy(proxies, b["proxy_id"])
             if proxy:
                 ip = proxy.get("ip", "?")
                 port = proxy.get("port_http", "?")
-                country = proxy.get("country_name", "?")
+                country = proxy.get("country", "?").upper()
                 date_end = proxy.get("date_end", "")[:10]
-                lines.append(
-                    f"🟦 {login} — {ip}:{port} "
-                    f"({country}) — до {date_end}")
-            else:
-                lines.append(
-                    f"🟦 {login} — #{b['proxy_id']} (?)")
-        else:
-            lines.append(f"🟦 {login} — нет прокси")
+                days = _days_left(proxy.get("date_end", ""))
+                
+                if days > 7:
+                    sq = "🟩"
+                elif days > 3:
+                    sq = "🟧"
+                else:
+                    sq = "🟥"
+                
+                return f"{sq} {login} — {ip}:{port} ({country}) — до {date_end} ({days}д)"
+            return f"🟦 {login} — proxy не найден"
+        return f"🟦 {login} — нет прокси"
+
+    invest_accs = db.get_invest_accounts()
+    circle_accs = db.get_circle_accounts()
+
+    if circle_accs:
+        lines.append("🔄🔄🔄 КРУГИ 🔄🔄🔄\n")
+        for a in circle_accs:
+            lines.append(_format_acc(a["login"]))
+        lines.append("\n—————————————")
+
+    if invest_accs:
+        lines.append("📈📈📈 ИНВЕСТИЦИИ 📈📈📈\n")
+        for a in invest_accs:
+            lines.append(_format_acc(a["login"]))
 
     try:
         bal = await proxyline.get_balance()
@@ -190,13 +207,87 @@ async def on_proxy_callback(q, data: str,
 
     elif data.startswith("px:bind:"):
         login = data[8:]
-        ctx.user_data["flow"] = "px_bind"
-        ctx.user_data["px_login"] = login
+        
+        # Получить список свободных прокси
+        proxies = await _get_proxies()
+        bindings = db.get_all_proxy_bindings()
+        bound_ids = {b["proxy_id"] for b in bindings}
+        
+        # Фильтруем только свободные
+        free_proxies = [p for p in proxies if p.get("id") not in bound_ids]
+        
+        if not free_proxies:
+            await q.message.edit_text(
+                "❌ Нет свободных прокси на Proxyline",
+                reply_markup=_proxy_kb())
+            return
+        
+        # Создаём кнопки для выбора прокси
+        rows = []
+        row = []
+        for proxy in free_proxies[:20]:  # Лимит 20 кнопок
+            proxy_id = proxy.get("id", 0)
+            ip = proxy.get("ip", "?")
+            port = proxy.get("port_http", "?")
+            country = proxy.get("country", "?").upper()
+            days = _days_left(proxy.get("date_end", ""))
+            
+            # Формируем текст кнопки
+            btn_text = f"🌐 {ip}:{port} ({country}, {days}д)"
+            row.append(InlineKeyboardButton(
+                btn_text, callback_data=f"px:bind_select:{login}:{proxy_id}"))
+            
+            if len(row) == 1:  # Одна кнопка в ряд (они длинные)
+                rows.append(row)
+                row = []
+        
+        if row:
+            rows.append(row)
+        
+        rows.append([InlineKeyboardButton("🔙", callback_data="px:bind")])
+        
         await q.message.edit_text(
-            f"🔗 Привязка прокси к <b>{login}</b>\n\n"
-            f"Введи Proxy ID (число из Proxyline):",
+            f"🔗 Выбери прокси для <b>{login}</b>:\n\n"
+            f"(всего свободных: {len(free_proxies)})",
+            reply_markup=InlineKeyboardMarkup(rows),
             parse_mode="HTML")
 
+    # --- Подтверждение выбора прокси ---
+    elif data.startswith("px:bind_select:"):
+        parts = data.split(":")
+        if len(parts) >= 3:
+            login = parts[1]
+            proxy_id = int(parts[2])
+            
+            # Привязываем прокси
+            db.bind_proxy(login, proxy_id)
+            
+            # Получаем информацию о прокси для подтверждения
+            proxies = await _get_proxies()
+            proxy = _find_proxy(proxies, proxy_id)
+            if proxy:
+                ip = proxy.get("ip", "?")
+                port = proxy.get("port_http", "?")
+                country = proxy.get("country", "?").upper()
+                days = _days_left(proxy.get("date_end", ""))
+                
+                await q.message.edit_text(
+                    f"✅ Прокси привязан!\n\n"
+                    f"🌐 {ip}:{port}\n"
+                    f"🌍 {country}\n"
+                    f"📅 {days} дней\n"
+                    f"👤 Аккаунт: {login}",
+                    reply_markup=_proxy_kb(),
+                    parse_mode="HTML")
+            else:
+                await q.message.edit_text(
+                    f"✅ Прокси #{proxy_id} привязан к {login}",
+                    reply_markup=_proxy_kb())
+            
+            # Очищаем flow
+            ctx.user_data.clear()
+            return
+    
     # --- Скрыть прокси ---
     elif data == "px:hide_pick":
         proxies = await _get_proxies()
@@ -465,16 +556,10 @@ async def handle_proxy_text(update: Update,
     text = update.message.text.strip()
 
     if flow == "px_bind":
-        login = ctx.user_data.pop("px_login", "")
+        # ✅ Больше не используется - привязка через кнопки
         ctx.user_data.clear()
-        try:
-            proxy_id = int(text)
-        except ValueError:
-            await update.message.reply_text("❌ Введи число (Proxy ID)")
-            return True
-        db.bind_proxy(login, proxy_id)
         await update.message.reply_text(
-            f"✅ Прокси #{proxy_id} привязан к {login}",
+            "ℹ️ Используй кнопки для выбора прокси",
             reply_markup=_proxy_kb())
         return True
 
