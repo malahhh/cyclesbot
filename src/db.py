@@ -120,9 +120,12 @@ def delete_invest_account(aid: int) -> bool:
 # ============================================================
 # Circle accounts (Круги)
 # ============================================================
-def get_circle_accounts() -> list:
+def get_circle_accounts(include_done: bool = False) -> list:
+    if include_done:
+        return [dict(r) for r in get_conn().execute(
+            "SELECT * FROM circle_accounts ORDER BY id").fetchall()]
     return [dict(r) for r in get_conn().execute(
-        "SELECT * FROM circle_accounts ORDER BY id").fetchall()]
+        "SELECT * FROM circle_accounts WHERE status != 'done' ORDER BY id").fetchall()]
 
 
 def get_circle_account(aid: int) -> dict:
