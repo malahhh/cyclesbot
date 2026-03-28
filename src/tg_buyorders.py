@@ -111,11 +111,53 @@ def _get_steamwebapi_data() -> list:
         os.chdir(saved_cwd)
 
 
+# Кэш MarketCSGO bulk
+_mcsgo_cache: set = set()
+_mcsgo_cache_ts: float = 0
+_MCSGO_CACHE_TTL = 3600  # 1 час
+
+
 def _get_marketcsgo_names() -> set:
-    """Загрузить множество названий предметов с MarketCSGO из sniper.db."""
+    """Загрузить названия предметов с MarketCSGO через bulk API (кэш 1ч)."""
+    global _mcsgo_cache, _mcsgo_cache_ts
+    
+    if _mcsgo_cache and (time.time() - _mcsgo_cache_ts < _MCSGO_CACHE_TTL):
+        log.info("MarketCSGO: из кэша (%d названий)", len(_mcsgo_cache))
+        return _mcsgo_cache
+    
+    import httpx
+    url = "https://market.csgo.com/api/v2/prices/class_instance/USD.json"
+    
+    try:
+        log.info("MarketCSGO: загрузка bulk API...")
+        r = httpx.get(url, timeout=60)
+        data = r.json()
+        
+        if not data.get("success"):
+            log.error("MarketCSGO bulk: success=false")
+            return _mcsgo_cache or set()
+        
+        items = data.get("items", {})
+        names = set()
+        for key, val in items.items():
+            name = val.get("market_hash_name", "")
+            if name:
+                names.add(name)
+        
+        _mcsgo_cache = names
+        _mcsgo_cache_ts = time.time()
+        log.info("MarketCSGO: загружено %d уникальных названий (bulk API)", len(names))
+        return names
+    except Exception as e:
+        log.error("MarketCSGO bulk error: %s", e)
+        # Fallback: sniper.db
+        return _get_marketcsgo_names_fallback()
+
+
+def _get_marketcsgo_names_fallback() -> set:
+    """Fallback: загрузить из sniper.db если API недоступен."""
     import sqlite3
     if not os.path.exists(SNIPER_DB):
-        log.warning("sniper.db не найден: %s", SNIPER_DB)
         return set()
     try:
         conn = sqlite3.connect(SNIPER_DB, timeout=10)
@@ -124,10 +166,10 @@ def _get_marketcsgo_names() -> set:
         ).fetchall()
         conn.close()
         names = {r[0] for r in rows}
-        log.info("MarketCSGO: загружено %d названий из sniper.db", len(names))
+        log.info("MarketCSGO fallback: %d названий из sniper.db", len(names))
         return names
     except Exception as e:
-        log.error("MarketCSGO names error: %s", e)
+        log.error("MarketCSGO fallback error: %s", e)
         return set()
 
 
