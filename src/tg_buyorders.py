@@ -60,6 +60,11 @@ ANTIBOOST_VELOCITY_THRESHOLD = -5.0  # latest vs med7d (было -7%)
 ANTIBOOST_MIN_SOLD_24H = 20          # минимум ликвидность (было 5)
 MIN_AGE_DAYS = 180                   # минимум 6 месяцев на рынке
 
+# MarketCSGO API
+MCSGO_API_KEY = "Og13Tpq8R6ErI11h71n96YwKN4nEM4J"
+MCSGO_BATCH_SIZE = 50                # макс предметов за запрос
+MCSGO_RATE_LIMIT = 0.26              # ~4 req/sec → 0.25с между запросами
+
 
 def _excludes_kb(excluded: set) -> InlineKeyboardMarkup:
     """Клавиатура toggle-кнопок для исключений."""
@@ -112,53 +117,128 @@ def _get_steamwebapi_data() -> list:
         os.chdir(saved_cwd)
 
 
-# Кэш MarketCSGO bulk {name: price}
-_mcsgo_cache: dict = {}
-_mcsgo_cache_ts: float = 0
+# Кэш MarketCSGO bulk {name: price} — быстрая проверка наличия
+_mcsgo_names_cache: set = set()
+_mcsgo_names_ts: float = 0
 _MCSGO_CACHE_TTL = 3600  # 1 час
 
 
-def _get_marketcsgo_prices() -> dict:
-    """Загрузить цены MarketCSGO через bulk API (кэш 1ч).
+def _get_marketcsgo_names() -> set:
+    """Быстрая загрузка множества названий через bulk (для фильтрации)."""
+    global _mcsgo_names_cache, _mcsgo_names_ts
     
-    Returns: {market_hash_name: price_float}
-    """
-    global _mcsgo_cache, _mcsgo_cache_ts
-    
-    if _mcsgo_cache and (time.time() - _mcsgo_cache_ts < _MCSGO_CACHE_TTL):
-        log.info("MarketCSGO: из кэша (%d предметов)", len(_mcsgo_cache))
-        return _mcsgo_cache
+    if _mcsgo_names_cache and (time.time() - _mcsgo_names_ts < _MCSGO_CACHE_TTL):
+        log.info("MarketCSGO names: из кэша (%d)", len(_mcsgo_names_cache))
+        return _mcsgo_names_cache
     
     import httpx
-    url = "https://market.csgo.com/api/v2/prices/class_instance/USD.json"
-    
     try:
-        log.info("MarketCSGO: загрузка bulk API...")
-        r = httpx.get(url, timeout=60)
+        log.info("MarketCSGO: загрузка bulk для списка названий...")
+        r = httpx.get(
+            "https://market.csgo.com/api/v2/prices/class_instance/USD.json",
+            timeout=60)
         data = r.json()
-        
-        if not data.get("success"):
-            log.error("MarketCSGO bulk: success=false")
-            return _mcsgo_cache or {}
-        
-        items = data.get("items", {})
-        prices = {}
-        for key, val in items.items():
-            name = val.get("market_hash_name", "")
-            price = val.get("price")
-            if name and price:
-                try:
-                    prices[name] = float(price)
-                except (ValueError, TypeError):
-                    pass
-        
-        _mcsgo_cache = prices
-        _mcsgo_cache_ts = time.time()
-        log.info("MarketCSGO: загружено %d предметов с ценами (bulk API)", len(prices))
-        return prices
+        if data.get("success"):
+            names = set()
+            for val in data.get("items", {}).values():
+                n = val.get("market_hash_name", "")
+                if n:
+                    names.add(n)
+            _mcsgo_names_cache = names
+            _mcsgo_names_ts = time.time()
+            log.info("MarketCSGO: %d названий загружено", len(names))
+            return names
     except Exception as e:
-        log.error("MarketCSGO bulk error: %s", e)
-        return _mcsgo_cache or {}
+        log.error("MarketCSGO bulk names error: %s", e)
+    return _mcsgo_names_cache or set()
+
+
+def _get_mcsgo_ref_prices(names: list) -> dict:
+    """Получить негативные ref-цены через MarketCSGO API (batch по 50).
+    
+    Для каждого предмета:
+      ref_price = min(median_7d, median_30d, latest)
+    
+    Returns: {name: ref_price}
+    """
+    import httpx
+    import statistics
+    
+    now = time.time()
+    result = {}
+    batches = [names[i:i + MCSGO_BATCH_SIZE]
+               for i in range(0, len(names), MCSGO_BATCH_SIZE)]
+    
+    log.info("MarketCSGO API: %d предметов, %d батчей (по %d)",
+             len(names), len(batches), MCSGO_BATCH_SIZE)
+    
+    for bi, batch in enumerate(batches):
+        params = {"key": MCSGO_API_KEY}
+        for name in batch:
+            params.setdefault("list_hash_name[]", [])
+            if isinstance(params["list_hash_name[]"], str):
+                params["list_hash_name[]"] = [params["list_hash_name[]"]]
+        
+        # httpx нужен список для repeated params
+        url = "https://market.csgo.com/api/v2/get-list-items-info"
+        query_parts = [f"key={MCSGO_API_KEY}"]
+        for name in batch:
+            query_parts.append(f"list_hash_name[]={quote(name)}")
+        full_url = url + "?" + "&".join(query_parts)
+        
+        try:
+            r = httpx.get(full_url, timeout=30)
+            data = r.json()
+            
+            if not data.get("success"):
+                log.warning("MarketCSGO batch %d/%d: success=false",
+                           bi + 1, len(batches))
+                time.sleep(MCSGO_RATE_LIMIT)
+                continue
+            
+            for name, info in data.get("data", {}).items():
+                history = info.get("history", [])
+                if not history:
+                    continue
+                
+                # latest = первый элемент (самый свежий)
+                latest_price = float(history[0][1]) if history else 0
+                
+                # Фильтруем по периодам
+                prices_7d = []
+                prices_30d = []
+                for entry in history:
+                    ts = int(entry[0])
+                    price = float(entry[1])
+                    age = now - ts
+                    if age <= 7 * 86400:
+                        prices_7d.append(price)
+                    if age <= 30 * 86400:
+                        prices_30d.append(price)
+                
+                med7 = statistics.median(prices_7d) if prices_7d else latest_price
+                med30 = statistics.median(prices_30d) if prices_30d else latest_price
+                
+                # Негативный сценарий: минимум из трёх
+                ref_price = min(med7, med30, latest_price)
+                if ref_price > 0:
+                    result[name] = round(ref_price, 2)
+                    
+        except Exception as e:
+            log.error("MarketCSGO batch %d/%d error: %s", bi + 1, len(batches), e)
+        
+        # Rate limit
+        if bi < len(batches) - 1:
+            time.sleep(MCSGO_RATE_LIMIT)
+        
+        # Прогресс каждые 20 батчей
+        if (bi + 1) % 20 == 0:
+            log.info("MarketCSGO API: %d/%d батчей (%d цен получено)",
+                    bi + 1, len(batches), len(result))
+    
+    log.info("MarketCSGO API: готово, %d/%d цен получено",
+             len(result), len(names))
+    return result
 
 
 def _antiboost_check(item: dict) -> tuple[bool, list[str]]:
@@ -277,16 +357,23 @@ def _should_exclude(name: str, excluded: set) -> bool:
 
 def _build_items(raw_items: list, excluded: set,
                  min_price: float, max_price: float,
-                 total_volume: float) -> list:
-    """Отобрать и отсортировать предметы с антибустом и проверкой MarketCSGO."""
-    results = []
+                 total_volume: float,
+                 progress_cb=None) -> list:
+    """Отобрать и отсортировать предметы с антибустом и проверкой MarketCSGO.
     
-    # Загружаем цены MarketCSGO для проверки ликвидности и расчёта маржи
-    mcsgo_prices = _get_marketcsgo_prices()
+    Двухфазная фильтрация:
+    1. Быстрая фильтрация (SteamWebAPI + bulk names) → кандидаты
+    2. Batch запрос ref-цен MarketCSGO API → финальный расчёт маржи
+    """
+    # Фаза 1: быстрая фильтрация
+    mcsgo_names = _get_marketcsgo_names()
     
     stats = {"total": 0, "no_buy": 0, "no_steam": 0, "low_sold": 0,
              "price_filter": 0, "excluded_cat": 0, "no_mcsgo": 0,
-             "too_young": 0, "antiboost": 0, "no_margin": 0, "passed": 0}
+             "too_young": 0, "antiboost": 0, "no_margin": 0,
+             "no_ref_price": 0, "passed": 0}
+    
+    candidates = []  # прошли быстрые фильтры
 
     for item in raw_items:
         name = item.get("markethashname", "")
@@ -309,36 +396,64 @@ def _build_items(raw_items: list, excluded: set,
             stats["low_sold"] += 1
             continue
 
-        # Фильтр по цене
         if buy_order < min_price or buy_order > max_price:
             stats["price_filter"] += 1
             continue
 
-        # Исключения по категориям
         if _should_exclude(name, excluded):
             stats["excluded_cat"] += 1
             continue
 
-        # ✅ Проверка наличия на MarketCSGO + получение реальной цены
-        mcsgo_price = mcsgo_prices.get(name)
-        if mcsgo_prices and not mcsgo_price:
+        if mcsgo_names and name not in mcsgo_names:
             stats["no_mcsgo"] += 1
             continue
 
-        # ✅ Проверка возраста (минимум 6 месяцев)
         if _is_too_young(item):
             stats["too_young"] += 1
             continue
 
-        # ✅ Антибуст (ужесточённый)
-        ab_passed, ab_reasons = _antiboost_check(item)
+        ab_passed, _ = _antiboost_check(item)
         if not ab_passed:
             stats["antiboost"] += 1
             continue
 
-        # ✅ Маржа от РЕАЛЬНОЙ цены MarketCSGO (не Steam медианы)
-        sell_price = mcsgo_price if mcsgo_price else steam_price
-        net = sell_price * (1 - MARKET_FEE)
+        candidates.append({
+            "name": name,
+            "buy_order": buy_order,
+            "steam_price": steam_price,
+            "sold24h": sold24h,
+            "item": item,
+        })
+
+    log.info("📊 Фаза 1: %d кандидатов из %d (нет buy=%d, нет steam=%d, "
+             "sold=%d, цена=%d, кат=%d, MCS=%d, молод=%d, антибуст=%d)",
+             len(candidates), stats["total"], stats["no_buy"],
+             stats["no_steam"], stats["low_sold"], stats["price_filter"],
+             stats["excluded_cat"], stats["no_mcsgo"], stats["too_young"],
+             stats["antiboost"])
+
+    if not candidates:
+        return []
+
+    # Фаза 2: получаем ref-цены MarketCSGO API (batch по 50)
+    if progress_cb:
+        progress_cb(f"⏳ Получаю цены MarketCSGO ({len(candidates)} предметов)...")
+    
+    candidate_names = [c["name"] for c in candidates]
+    ref_prices = _get_mcsgo_ref_prices(candidate_names)
+    
+    # Фаза 3: финальный расчёт маржи от ref-цен
+    results = []
+    for c in candidates:
+        name = c["name"]
+        buy_order = c["buy_order"]
+        
+        ref_price = ref_prices.get(name)
+        if not ref_price or ref_price <= 0:
+            stats["no_ref_price"] += 1
+            continue
+        
+        net = ref_price * (1 - MARKET_FEE)
         margin = ((net - buy_order) / buy_order * 100) if buy_order > 0 else 0
         if margin <= 0:
             stats["no_margin"] += 1
@@ -352,22 +467,17 @@ def _build_items(raw_items: list, excluded: set,
         results.append({
             "name": name,
             "buy_order": round(buy_order, 2),
-            "steam_price": round(steam_price, 2),
-            "mcsgo_price": round(sell_price, 2),
+            "steam_price": round(c["steam_price"], 2),
+            "mcsgo_price": round(ref_price, 2),
             "net": round(net, 2),
             "margin": round(margin, 1),
-            "volume": sold24h,
+            "volume": c["sold24h"],
             "url": steam_url,
             "mcsgo_url": mcsgo_url,
         })
 
-    # Логируем статистику фильтрации
-    log.info("📊 Фильтрация: всего=%d, нет buy=%d, нет steam=%d, "
-             "мало sold=%d, цена=%d, категория=%d, нет MCS=%d, "
-             "молодой=%d, антибуст=%d, нет маржи=%d → прошли=%d",
-             stats["total"], stats["no_buy"], stats["no_steam"],
-             stats["low_sold"], stats["price_filter"], stats["excluded_cat"],
-             stats["no_mcsgo"], stats["too_young"], stats["antiboost"],
+    log.info("📊 Фаза 2: ref-цены=%d/%d, нет маржи=%d → итого=%d",
+             len(ref_prices), len(candidates),
              stats["no_margin"], stats["passed"])
     
     # Сортировка по марже
@@ -660,6 +770,15 @@ async def got_max_price(update: Update,
             ctx.user_data.clear()
             return ConversationHandler.END
 
+        async def _progress(text):
+            try:
+                await msg.edit_text(text, parse_mode="HTML")
+            except Exception:
+                pass
+        
+        import asyncio
+        loop = asyncio.get_event_loop()
+        
         items = _build_items(raw, excluded, min_price, max_price, volume)
         if not items:
             await msg.edit_text("❌ Нет предметов по заданным параметрам")
