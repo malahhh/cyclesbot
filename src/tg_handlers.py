@@ -32,7 +32,8 @@ def _main_kb() -> ReplyKeyboardMarkup:
         [[KeyboardButton("📊 Инвестиции"),
           KeyboardButton("🔄 Круги")],
          [KeyboardButton("🌐 Прокси"),
-          KeyboardButton("📜 История")]],
+          KeyboardButton("📜 История")],
+         [KeyboardButton("📊 Создать БД STM-MCS")]],
         resize_keyboard=True)
 
 
@@ -555,6 +556,10 @@ async def handle_text(update: Update,
 
 
 def setup_handlers(app):
+    # ConversationHandler для buy orders (должен быть ДО общего MessageHandler)
+    import tg_buyorders
+    app.add_handler(tg_buyorders.get_conversation_handler())
+    
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(
