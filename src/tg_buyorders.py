@@ -201,15 +201,52 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                 if not history:
                     continue
                 
-                # latest = первый элемент (самый свежий)
-                latest_price = float(history[0][1]) if history else 0
+                all_prices = []
+                for entry in history:
+                    try:
+                        all_prices.append(float(entry[1]))
+                    except (ValueError, TypeError, IndexError):
+                        pass
+                
+                if not all_prices:
+                    continue
+                
+                latest_price = all_prices[0]
+                
+                # --- Фильтр: стабильность цены ---
+                # stdev > 30% от медианы → исключить
+                # НО: только если >3 продаж за пределами ±30% от медианы
+                if len(all_prices) >= 10:
+                    med_all = statistics.median(all_prices)
+                    if med_all > 0:
+                        outliers = sum(
+                            1 for p in all_prices
+                            if abs(p - med_all) / med_all > 0.30)
+                        if outliers > 3:
+                            stdev = statistics.stdev(all_prices)
+                            if stdev / med_all > 0.30:
+                                continue  # нестабильная цена
+                
+                # --- Фильтр: тренд на MCSGO ---
+                # avg последних 10 vs avg первых 10
+                # Если дешевеет >10% → исключить
+                if len(all_prices) >= 20:
+                    avg_last10 = statistics.mean(all_prices[:10])
+                    avg_first10 = statistics.mean(all_prices[-10:])
+                    if avg_first10 > 0:
+                        trend = (avg_last10 - avg_first10) / avg_first10 * 100
+                        if trend < -10:
+                            continue  # предмет дешевеет
                 
                 # Фильтруем по периодам
                 prices_7d = []
                 prices_30d = []
                 for entry in history:
-                    ts = int(entry[0])
-                    price = float(entry[1])
+                    try:
+                        ts = int(entry[0])
+                        price = float(entry[1])
+                    except (ValueError, TypeError, IndexError):
+                        continue
                     age = now - ts
                     if age <= 7 * 86400:
                         prices_7d.append(price)
