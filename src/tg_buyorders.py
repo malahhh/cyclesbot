@@ -63,7 +63,7 @@ MIN_AGE_DAYS = 180                   # минимум 6 месяцев на ры
 # MarketCSGO API
 MCSGO_API_KEY = "Og13Tpq8R6ErI11h71n96YwKN4nEM4J"
 MCSGO_BATCH_SIZE = 50                # макс предметов за запрос
-MCSGO_RATE_LIMIT = 0.26              # ~4 req/sec → 0.25с между запросами
+MCSGO_RATE_LIMIT = 0.35              # ~3 req/sec (с запасом, лимит 4 req/sec)
 
 
 def _excludes_kb(excluded: set) -> InlineKeyboardMarkup:
