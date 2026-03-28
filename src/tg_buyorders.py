@@ -29,7 +29,7 @@ from telegram.ext import (ContextTypes, ConversationHandler,
 log = logging.getLogger("invest")
 
 # States
-ST_VOLUME, ST_EXCLUDES, ST_MIN_PRICE, ST_MAX_PRICE = range(4)
+ST_VOLUME, ST_EXCLUDES, ST_MIN_PRICE, ST_MAX_PRICE, ST_DISCOUNT = range(5)
 
 # Категории для исключения
 CATEGORIES = [
@@ -57,7 +57,7 @@ OUTPUT_DIR = os.path.expanduser(
 # Ужесточённые пороги антибуста для buy orders
 ANTIBOOST_TREND_THRESHOLD = -10.0    # med7d vs med30d (было -20%)
 ANTIBOOST_VELOCITY_THRESHOLD = -5.0  # latest vs med7d (было -7%)
-ANTIBOOST_MIN_SOLD_24H = 20          # минимум ликвидность (было 5)
+ANTIBOOST_MIN_SOLD_24H = 12          # минимум ликвидность
 MIN_AGE_DAYS = 180                   # минимум 6 месяцев на рынке
 
 # MarketCSGO API
@@ -395,6 +395,7 @@ def _should_exclude(name: str, excluded: set) -> bool:
 def _build_items(raw_items: list, excluded: set,
                  min_price: float, max_price: float,
                  total_volume: float,
+                 discount: float = 0,
                  progress_cb=None) -> list:
     """Отобрать и отсортировать предметы с антибустом и проверкой MarketCSGO.
     
@@ -479,11 +480,16 @@ def _build_items(raw_items: list, excluded: set,
     candidate_names = [c["name"] for c in candidates]
     ref_prices = _get_mcsgo_ref_prices(candidate_names)
     
-    # Фаза 3: финальный расчёт маржи от ref-цен
+    # Фаза 3: финальный расчёт маржи от ref-цен (с учётом скидки)
+    discount_mult = 1 - (discount / 100) if discount > 0 else 1
+    if discount > 0:
+        log.info("📉 Скидка к buy order: %d%% (множитель %.2f)", discount, discount_mult)
+    
     results = []
     for c in candidates:
         name = c["name"]
-        buy_order = c["buy_order"]
+        original_buy = c["buy_order"]
+        buy_price = round(original_buy * discount_mult, 2)  # со скидкой
         
         ref_price = ref_prices.get(name)
         if not ref_price or ref_price <= 0:
@@ -491,7 +497,7 @@ def _build_items(raw_items: list, excluded: set,
             continue
         
         net = ref_price * (1 - MARKET_FEE)
-        margin = ((net - buy_order) / buy_order * 100) if buy_order > 0 else 0
+        margin = ((net - buy_price) / buy_price * 100) if buy_price > 0 else 0
         if margin <= 0:
             stats["no_margin"] += 1
             continue
@@ -503,7 +509,8 @@ def _build_items(raw_items: list, excluded: set,
         stats["passed"] += 1
         results.append({
             "name": name,
-            "buy_order": round(buy_order, 2),
+            "buy_order": buy_price,          # уже со скидкой
+            "original_buy": original_buy,     # оригинальный
             "steam_price": round(c["steam_price"], 2),
             "mcsgo_price": round(ref_price, 2),
             "net": round(net, 2),
@@ -520,28 +527,19 @@ def _build_items(raw_items: list, excluded: set,
     # Сортировка по марже
     results.sort(key=lambda x: x["margin"], reverse=True)
 
-    # Распределение количества ордеров
-    if results and total_volume > 0:
-        # Равномерное распределение по топ предметам
-        budget_left = total_volume
+    # Каждый предмет по 1 штуке, обрезаем по бюджету
+    budget_left = total_volume
+    for item in results:
+        item["qty"] = 1
+    
+    # Обрезаем по бюджету
+    if total_volume > 0:
+        filtered = []
         for item in results:
-            qty = max(1, int(budget_left / item["buy_order"] / len(results)))
-            if qty * item["buy_order"] > budget_left:
-                qty = max(1, int(budget_left / item["buy_order"]))
-            item["qty"] = qty
-
-        # Второй проход: заполняем бюджет сверху вниз
-        budget_left = total_volume
-        for item in results:
-            max_qty = int(budget_left / item["buy_order"]) if item["buy_order"] > 0 else 0
-            item["qty"] = min(max_qty, max(1, item.get("qty", 1)))
-            budget_left -= item["qty"] * item["buy_order"]
-            if budget_left <= 0:
-                item["qty"] = max(item["qty"], 0)
-                break
-        
-        # Убираем предметы с qty=0
-        results = [r for r in results if r.get("qty", 0) > 0]
+            if budget_left >= item["buy_order"]:
+                filtered.append(item)
+                budget_left -= item["buy_order"]
+        results = filtered
 
     log.info("Отобрано: %d предметов", len(results))
     return results
@@ -762,7 +760,7 @@ async def got_min_price(update: Update,
 
 async def got_max_price(update: Update,
                         ctx: ContextTypes.DEFAULT_TYPE):
-    """Получили макс. цену → генерируем Excel."""
+    """Получили макс. цену → спрашиваем скидку."""
     text = update.message.text.strip().replace("$", "").replace(",", ".")
     if text in (".", "", "д", "ок"):
         max_price = 10.0  # дефолт
@@ -781,21 +779,54 @@ async def got_max_price(update: Update,
             f"❌ Макс. цена должна быть > мин. (${min_price:.2f})")
         return ST_MAX_PRICE
 
+    ctx.user_data["bo_max_price"] = max_price
+
+    await update.message.reply_text(
+        f"✅ Макс. цена: <b>${max_price:.2f}</b>\n\n"
+        f"На сколько <b>%</b> ниже текущего buy order ставить ордер?\n"
+        f"<i>Например: 10 → ордер = buyorder × 0.90</i>\n"
+        f"<i>0 = без скидки (по умолчанию)</i>",
+        parse_mode="HTML")
+    return ST_DISCOUNT
+
+
+async def got_discount(update: Update,
+                       ctx: ContextTypes.DEFAULT_TYPE):
+    """Получили скидку → генерируем Excel."""
+    text = update.message.text.strip().replace("%", "").replace(",", ".")
+    if text in ("0", ".", "", "д", "ок", "нет", "-"):
+        discount = 0.0
+    else:
+        try:
+            discount = float(text)
+            if discount < 0 or discount >= 100:
+                await update.message.reply_text("❌ Введи число от 0 до 99")
+                return ST_DISCOUNT
+        except ValueError:
+            await update.message.reply_text("❌ Введи число (% скидки)")
+            return ST_DISCOUNT
+
     volume = ctx.user_data.get("bo_volume", 100)
     excluded = ctx.user_data.get("bo_excludes", set())
+    min_price = ctx.user_data.get("bo_min_price", 0)
+    max_price = ctx.user_data.get("bo_max_price", 10)
 
     params = {
         "volume": volume,
         "min_price": min_price,
         "max_price": max_price,
+        "discount": discount,
         "excluded": list(excluded),
     }
+
+    discount_text = f"📉 Скидка: {discount:.0f}%" if discount > 0 else ""
 
     # Отправляем "генерирую..."
     msg = await update.message.reply_text(
         f"⏳ <b>Генерирую БД STM-MCS...</b>\n\n"
         f"💰 Объём: ${volume:.2f}\n"
         f"📊 Цена: ${min_price:.2f} — ${max_price:.2f}\n"
+        f"{discount_text}\n"
         f"🚫 Исключено: {len(excluded)} категорий",
         parse_mode="HTML")
 
@@ -807,16 +838,8 @@ async def got_max_price(update: Update,
             ctx.user_data.clear()
             return ConversationHandler.END
 
-        async def _progress(text):
-            try:
-                await msg.edit_text(text, parse_mode="HTML")
-            except Exception:
-                pass
-        
-        import asyncio
-        loop = asyncio.get_event_loop()
-        
-        items = _build_items(raw, excluded, min_price, max_price, volume)
+        items = _build_items(raw, excluded, min_price, max_price,
+                             volume, discount=discount)
         if not items:
             await msg.edit_text("❌ Нет предметов по заданным параметрам")
             ctx.user_data.clear()
@@ -827,12 +850,16 @@ async def got_max_price(update: Update,
         total_cost = sum(it["buy_order"] * it.get("qty", 1) for it in items)
         avg_margin = sum(it["margin"] for it in items) / len(items)
 
+        disc_line = (f"📉 Скидка к buy order: {discount:.0f}%\n"
+                     if discount > 0 else "")
+
         await msg.edit_text(
             f"✅ <b>БД STM-MCS готова!</b>\n\n"
             f"📦 Предметов: {len(items)} (из {len(raw)} загруженных)\n"
             f"💰 Общая стоимость: ${total_cost:.2f}\n"
             f"📈 Средняя маржа: {avg_margin:.1f}%\n"
             f"📊 Топ маржа: {items[0]['margin']:.1f}% ({items[0]['name'][:30]})\n\n"
+            f"{disc_line}"
             f"🛡 Антибуст: тренд ≥{ANTIBOOST_TREND_THRESHOLD}%, "
             f"velocity ≥{ANTIBOOST_VELOCITY_THRESHOLD}%\n"
             f"📈 Мин. ликвидность: {ANTIBOOST_MIN_SOLD_24H} sold/24ч\n"
@@ -845,7 +872,8 @@ async def got_max_price(update: Update,
                 document=f,
                 filename=os.path.basename(filepath),
                 caption=f"📊 Buy Orders | ${volume:.2f} | "
-                        f"{len(items)} предметов")
+                        f"{len(items)} предметов"
+                        f"{f' | скидка {discount:.0f}%' if discount > 0 else ''}")
 
     except Exception as e:
         log.error("Buyorders generation error: %s", e)
@@ -887,6 +915,10 @@ def get_conversation_handler() -> ConversationHandler:
             ST_MAX_PRICE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
                                got_max_price),
+            ],
+            ST_DISCOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               got_discount),
             ],
         },
         fallbacks=[
