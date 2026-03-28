@@ -29,7 +29,7 @@ from telegram.ext import (ContextTypes, ConversationHandler,
 log = logging.getLogger("invest")
 
 # States
-ST_VOLUME, ST_EXCLUDES, ST_MIN_PRICE, ST_MAX_PRICE, ST_MIN_PROFIT = range(5)
+ST_VOLUME, ST_EXCLUDES, ST_MIN_PRICE, ST_MAX_PRICE, ST_DISCOUNT, ST_MIN_PROFIT = range(6)
 
 # Категории для исключения
 CATEGORIES = [
@@ -395,6 +395,7 @@ def _should_exclude(name: str, excluded: set) -> bool:
 def _build_items(raw_items: list, excluded: set,
                  min_price: float, max_price: float,
                  total_volume: float,
+                 discount: float = 0,
                  min_profit: float = 0,
                  progress_cb=None) -> list:
     """Отобрать и отсортировать предметы с антибустом и проверкой MarketCSGO.
@@ -480,14 +481,17 @@ def _build_items(raw_items: list, excluded: set,
     candidate_names = [c["name"] for c in candidates]
     ref_prices = _get_mcsgo_ref_prices(candidate_names)
     
-    # Фаза 3: финальный расчёт маржи от ref-цен
+    # Фаза 3: финальный расчёт маржи от ref-цен (с учётом скидки)
+    discount_mult = 1 - (discount / 100) if discount > 0 else 1
+    if discount > 0:
+        log.info("📉 Скидка к buy order: %.0f%% (×%.2f)", discount, discount_mult)
     if min_profit > 0:
-        log.info("📈 Фильтр мин. прибыли: %.0f%%", min_profit)
+        log.info("📈 Фильтр мін. прибыли: %.0f%%", min_profit)
     
     results = []
     for c in candidates:
         name = c["name"]
-        buy_price = c["buy_order"]
+        buy_price = round(c["buy_order"] * discount_mult, 2)
         
         ref_price = ref_prices.get(name)
         if not ref_price or ref_price <= 0:
@@ -780,9 +784,38 @@ async def got_max_price(update: Update,
 
     await update.message.reply_text(
         f"✅ Макс. цена: <b>${max_price:.2f}</b>\n\n"
+        f"Скидка к buy order (<b>%</b>)?\n"
+        f"На сколько % ниже текущего buy order ставить ордер.\n"
+        f"<i>Например: 10 → ордер = buyorder × 0.90</i>\n"
+        f"<i>0 = без скидки (по умолчанию)</i>",
+        parse_mode="HTML")
+    return ST_DISCOUNT
+
+
+async def got_discount(update: Update,
+                       ctx: ContextTypes.DEFAULT_TYPE):
+    """Получили скидку → спрашиваем мин. прибыль."""
+    text = update.message.text.strip().replace("%", "").replace(",", ".")
+    if text in ("0", ".", "", "д", "ок", "нет", "-"):
+        discount = 0.0
+    else:
+        try:
+            discount = float(text)
+            if discount < 0 or discount >= 100:
+                await update.message.reply_text("❌ Введи число от 0 до 99")
+                return ST_DISCOUNT
+        except ValueError:
+            await update.message.reply_text("❌ Введи число (% скидки)")
+            return ST_DISCOUNT
+
+    ctx.user_data["bo_discount"] = discount
+    disc_text = f" (ордер = buyorder × {1 - discount/100:.2f})" if discount > 0 else ""
+
+    await update.message.reply_text(
+        f"✅ Скидка: <b>{discount:.0f}%</b>{disc_text}\n\n"
         f"Минимальный <b>% прибыли</b> при завозе?\n"
         f"<i>Например: 5 → только предметы с маржой ≥ 5%</i>\n"
-        f"<i>0 = без фильтра (по умолчанию)</i>",
+        f"<i>По умолчанию: 8%</i>",
         parse_mode="HTML")
     return ST_MIN_PROFIT
 
@@ -791,8 +824,8 @@ async def got_min_profit(update: Update,
                          ctx: ContextTypes.DEFAULT_TYPE):
     """Получили мин. прибыль → генерируем Excel."""
     text = update.message.text.strip().replace("%", "").replace(",", ".")
-    if text in ("0", ".", "", "д", "ок", "нет", "-"):
-        min_profit = 0.0
+    if text in (".", "", "д", "ок"):
+        min_profit = 8.0  # дефолт 8%
     else:
         try:
             min_profit = float(text)
@@ -807,23 +840,30 @@ async def got_min_profit(update: Update,
     excluded = ctx.user_data.get("bo_excludes", set())
     min_price = ctx.user_data.get("bo_min_price", 0)
     max_price = ctx.user_data.get("bo_max_price", 10)
+    discount = ctx.user_data.get("bo_discount", 0)
 
     params = {
         "volume": volume,
         "min_price": min_price,
         "max_price": max_price,
+        "discount": discount,
         "min_profit": min_profit,
         "excluded": list(excluded),
     }
 
-    profit_text = f"📈 Мин. прибыль: {min_profit:.0f}%" if min_profit > 0 else ""
+    info_lines = []
+    if discount > 0:
+        info_lines.append(f"📉 Скидка: {discount:.0f}%")
+    if min_profit > 0:
+        info_lines.append(f"📈 Мин. прибыль: {min_profit:.0f}%")
+    extra_text = "\n".join(info_lines)
 
     # Отправляем "генерирую..."
     msg = await update.message.reply_text(
         f"⏳ <b>Генерирую БД STM-MCS...</b>\n\n"
         f"💰 Объём: ${volume:.2f}\n"
         f"📊 Цена: ${min_price:.2f} — ${max_price:.2f}\n"
-        f"{profit_text}\n"
+        f"{extra_text}\n"
         f"🚫 Исключено: {len(excluded)} категорий",
         parse_mode="HTML")
 
@@ -836,7 +876,7 @@ async def got_min_profit(update: Update,
             return ConversationHandler.END
 
         items = _build_items(raw, excluded, min_price, max_price,
-                             volume, min_profit=min_profit)
+                             volume, discount=discount, min_profit=min_profit)
         if not items:
             await msg.edit_text("❌ Нет предметов по заданным параметрам")
             ctx.user_data.clear()
@@ -847,8 +887,12 @@ async def got_min_profit(update: Update,
         total_cost = sum(it["buy_order"] * it.get("qty", 1) for it in items)
         avg_margin = sum(it["margin"] for it in items) / len(items)
 
-        profit_line = (f"📈 Мин. прибыль: {min_profit:.0f}%\n"
-                       if min_profit > 0 else "")
+        rl = []
+        if discount > 0:
+            rl.append(f"📉 Скидка: {discount:.0f}%")
+        if min_profit > 0:
+            rl.append(f"📈 Мін. прибыль: {min_profit:.0f}%")
+        extra_r = "\n".join(rl) + "\n" if rl else ""
 
         await msg.edit_text(
             f"✅ <b>БД STM-MCS готова!</b>\n\n"
@@ -856,10 +900,10 @@ async def got_min_profit(update: Update,
             f"💰 Общая стоимость: ${total_cost:.2f}\n"
             f"📈 Средняя маржа: {avg_margin:.1f}%\n"
             f"📊 Топ маржа: {items[0]['margin']:.1f}% ({items[0]['name'][:30]})\n\n"
-            f"{profit_line}"
+            f"{extra_r}"
             f"🛡 Антибуст: тренд ≥{ANTIBOOST_TREND_THRESHOLD}%, "
             f"velocity ≥{ANTIBOOST_VELOCITY_THRESHOLD}%\n"
-            f"📈 Мин. ликвидность: {ANTIBOOST_MIN_SOLD_24H} sold/24ч\n"
+            f"📈 Мін. ликвидность: {ANTIBOOST_MIN_SOLD_24H} sold/24ч\n"
             f"✅ Проверено на MarketCSGO",
             parse_mode="HTML")
 
@@ -912,6 +956,10 @@ def get_conversation_handler() -> ConversationHandler:
             ST_MAX_PRICE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
                                got_max_price),
+            ],
+            ST_DISCOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               got_discount),
             ],
             ST_MIN_PROFIT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
