@@ -137,38 +137,44 @@ async def show_proxy_section(update: Update,
     proxies = await _get_proxies()
 
     lines = ["🌐 <b>Прокси</b>\n"]
-
-    # Все аккаунты (invest + circle)
-    all_logins = set()
-    for a in db.get_invest_accounts():
-        all_logins.add(a["login"])
-    for a in db.get_circle_accounts():
-        all_logins.add(a["login"])
-
     binding_map = {b["account_login"]: b for b in bindings}
 
-    for login in sorted(all_logins):
+    def _format_acc(login):
         b = binding_map.get(login)
         if b:
             proxy = _find_proxy(proxies, b["proxy_id"])
             if proxy:
                 ip = proxy.get("ip", "?")
                 port = proxy.get("port_http", "?")
-                country = proxy.get("country_name",
-                                    proxy.get("country", "?"))
-                date_end = proxy.get("date_end", "")
-                days = _days_left(date_end)
-                end_s = date_end[:10] if date_end else "?"
-                warn = " ⚠️" if 0 < days <= 3 else ""
-                lines.append(
-                    f"🟦 {login} — {ip}:{port} "
-                    f"({country}) — до {end_s}{warn}")
-            else:
-                lines.append(
-                    f"🟦 {login} — proxy #{b['proxy_id']} "
-                    f"(не найден в API)")
-        else:
-            lines.append(f"🟦 {login} — нет прокси")
+                country = proxy.get("country", "?").upper()
+                date_end = proxy.get("date_end", "")[:10]
+                days = _days_left(proxy.get("date_end", ""))
+                
+                if days > 7:
+                    sq = "🟩"
+                elif days > 3:
+                    sq = "🟧"
+                else:
+                    sq = "🟥"
+                
+                return f"{sq} {login} — {ip}:{port} ({country}) — до {date_end} ({days}д)"
+            return f"🟦 {login} — proxy не найден"
+        return f"🟦 {login} — нет прокси"
+
+    # Разделяем на КРУГИ и ИНВЕСТИЦИИ
+    circle_accs = db.get_circle_accounts()
+    invest_accs = db.get_invest_accounts()
+
+    if circle_accs:
+        lines.append("🔄🔄🔄 КРУГИ 🔄🔄🔄\n")
+        for a in circle_accs:
+            lines.append(_format_acc(a["login"]))
+        lines.append("\n—————————————\n")
+
+    if invest_accs:
+        lines.append("📈📈📈 ИНВЕСТИЦИИ 📈📈📈\n")
+        for a in invest_accs:
+            lines.append(_format_acc(a["login"]))
 
     # Баланс
     try:
@@ -226,7 +232,7 @@ async def on_proxy_callback(q, data: str,
         rows = []
         row = []
         for proxy in free_proxies[:20]:  # Лимит 20 кнопок
-            proxy_id = proxy.get("id", 0)
+            proxy_id = int(proxy.get("id", 0))
             ip = proxy.get("ip", "?")
             port = proxy.get("port_http", "?")
             country = proxy.get("country", "?").upper()
@@ -234,6 +240,7 @@ async def on_proxy_callback(q, data: str,
             
             # Формируем текст кнопки
             btn_text = f"🌐 {ip}:{port} ({country}, {days}д)"
+            # ВАЖНО: использовать proxy_id как числовой ID в callback
             row.append(InlineKeyboardButton(
                 btn_text, callback_data=f"px:bind_select:{login}:{proxy_id}"))
             
@@ -254,10 +261,16 @@ async def on_proxy_callback(q, data: str,
 
     # --- Подтверждение выбора прокси ---
     elif data.startswith("px:bind_select:"):
-        parts = data.split(":")
-        if len(parts) >= 3:
-            login = parts[1]
-            proxy_id = int(parts[2])
+        try:
+            # Формат: px:bind_select:{login}:{proxy_id}
+            suffix = data[len("px:bind_select:"):]  # Берём всё после префикса
+            parts = suffix.split(":", 1)  # Разделяем на login и proxy_id (максимум 2 части)
+            if len(parts) != 2:
+                await q.answer("❌ Ошибка данных", show_alert=True)
+                return
+            
+            login = parts[0]
+            proxy_id = int(parts[1])
             
             # Привязываем прокси
             db.bind_proxy(login, proxy_id)
@@ -286,7 +299,9 @@ async def on_proxy_callback(q, data: str,
             
             # Очищаем flow
             ctx.user_data.clear()
-            return
+        except Exception as e:
+            log.error(f"px:bind_select error: {e}")
+            await q.answer(f"❌ {e}", show_alert=True)
     
     # --- Скрыть прокси ---
     elif data == "px:hide_pick":

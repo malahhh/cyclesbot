@@ -129,6 +129,8 @@ def _circles_kb() -> InlineKeyboardMarkup:
                               callback_data="cir:add")],
         [InlineKeyboardButton("✏️ Редактировать круг",
                               callback_data="cir:edit_pick")],
+        [InlineKeyboardButton("🔄 Обновить круг",
+                              callback_data="cir:refresh_pick")],
         [InlineKeyboardButton("✅ Завершить круг",
                               callback_data="cir:finish_pick")],
     ])
@@ -296,6 +298,23 @@ async def on_callback(update: Update,
             "🔙 Назад", callback_data="sec:circles")])
         await q.message.edit_text(
             "Выберите аккаунт:",
+            reply_markup=InlineKeyboardMarkup(rows))
+
+    # --- Круги: обновить — выбор аккаунта ---
+    elif data == "cir:refresh_pick":
+        accs = db.get_circle_accounts()
+        if not accs:
+            await q.message.edit_text("Нет кругов.",
+                                      reply_markup=_circles_kb())
+            return
+        rows = [[InlineKeyboardButton(
+            f"🔄 {a['login']} ({a['amount'] or '??'})",
+            callback_data=f"cir:ref:{a['id']}")]
+            for a in accs]
+        rows.append([InlineKeyboardButton(
+            "🔙 Назад", callback_data="sec:circles")])
+        await q.message.edit_text(
+            "Выберите круг для обновления:",
             reply_markup=InlineKeyboardMarkup(rows))
 
     # --- Круги: завершить — выбор аккаунта ---
