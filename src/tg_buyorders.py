@@ -112,18 +112,21 @@ def _get_steamwebapi_data() -> list:
         os.chdir(saved_cwd)
 
 
-# Кэш MarketCSGO bulk
-_mcsgo_cache: set = set()
+# Кэш MarketCSGO bulk {name: price}
+_mcsgo_cache: dict = {}
 _mcsgo_cache_ts: float = 0
 _MCSGO_CACHE_TTL = 3600  # 1 час
 
 
-def _get_marketcsgo_names() -> set:
-    """Загрузить названия предметов с MarketCSGO через bulk API (кэш 1ч)."""
+def _get_marketcsgo_prices() -> dict:
+    """Загрузить цены MarketCSGO через bulk API (кэш 1ч).
+    
+    Returns: {market_hash_name: price_float}
+    """
     global _mcsgo_cache, _mcsgo_cache_ts
     
     if _mcsgo_cache and (time.time() - _mcsgo_cache_ts < _MCSGO_CACHE_TTL):
-        log.info("MarketCSGO: из кэша (%d названий)", len(_mcsgo_cache))
+        log.info("MarketCSGO: из кэша (%d предметов)", len(_mcsgo_cache))
         return _mcsgo_cache
     
     import httpx
@@ -136,42 +139,26 @@ def _get_marketcsgo_names() -> set:
         
         if not data.get("success"):
             log.error("MarketCSGO bulk: success=false")
-            return _mcsgo_cache or set()
+            return _mcsgo_cache or {}
         
         items = data.get("items", {})
-        names = set()
+        prices = {}
         for key, val in items.items():
             name = val.get("market_hash_name", "")
-            if name:
-                names.add(name)
+            price = val.get("price")
+            if name and price:
+                try:
+                    prices[name] = float(price)
+                except (ValueError, TypeError):
+                    pass
         
-        _mcsgo_cache = names
+        _mcsgo_cache = prices
         _mcsgo_cache_ts = time.time()
-        log.info("MarketCSGO: загружено %d уникальных названий (bulk API)", len(names))
-        return names
+        log.info("MarketCSGO: загружено %d предметов с ценами (bulk API)", len(prices))
+        return prices
     except Exception as e:
         log.error("MarketCSGO bulk error: %s", e)
-        # Fallback: sniper.db
-        return _get_marketcsgo_names_fallback()
-
-
-def _get_marketcsgo_names_fallback() -> set:
-    """Fallback: загрузить из sniper.db если API недоступен."""
-    import sqlite3
-    if not os.path.exists(SNIPER_DB):
-        return set()
-    try:
-        conn = sqlite3.connect(SNIPER_DB, timeout=10)
-        rows = conn.execute(
-            "SELECT name FROM zakup_items WHERE marketplace='MarketCSGO'"
-        ).fetchall()
-        conn.close()
-        names = {r[0] for r in rows}
-        log.info("MarketCSGO fallback: %d названий из sniper.db", len(names))
-        return names
-    except Exception as e:
-        log.error("MarketCSGO fallback error: %s", e)
-        return set()
+        return _mcsgo_cache or {}
 
 
 def _antiboost_check(item: dict) -> tuple[bool, list[str]]:
@@ -294,8 +281,8 @@ def _build_items(raw_items: list, excluded: set,
     """Отобрать и отсортировать предметы с антибустом и проверкой MarketCSGO."""
     results = []
     
-    # Загружаем названия MarketCSGO для проверки ликвидности
-    mcsgo_names = _get_marketcsgo_names()
+    # Загружаем цены MarketCSGO для проверки ликвидности и расчёта маржи
+    mcsgo_prices = _get_marketcsgo_prices()
     
     stats = {"total": 0, "no_buy": 0, "no_steam": 0, "low_sold": 0,
              "price_filter": 0, "excluded_cat": 0, "no_mcsgo": 0,
@@ -332,8 +319,9 @@ def _build_items(raw_items: list, excluded: set,
             stats["excluded_cat"] += 1
             continue
 
-        # ✅ Проверка наличия на MarketCSGO
-        if mcsgo_names and name not in mcsgo_names:
+        # ✅ Проверка наличия на MarketCSGO + получение реальной цены
+        mcsgo_price = mcsgo_prices.get(name)
+        if mcsgo_prices and not mcsgo_price:
             stats["no_mcsgo"] += 1
             continue
 
@@ -348,8 +336,9 @@ def _build_items(raw_items: list, excluded: set,
             stats["antiboost"] += 1
             continue
 
-        # Маржа
-        net = steam_price * (1 - MARKET_FEE)
+        # ✅ Маржа от РЕАЛЬНОЙ цены MarketCSGO (не Steam медианы)
+        sell_price = mcsgo_price if mcsgo_price else steam_price
+        net = sell_price * (1 - MARKET_FEE)
         margin = ((net - buy_order) / buy_order * 100) if buy_order > 0 else 0
         if margin <= 0:
             stats["no_margin"] += 1
@@ -364,6 +353,7 @@ def _build_items(raw_items: list, excluded: set,
             "name": name,
             "buy_order": round(buy_order, 2),
             "steam_price": round(steam_price, 2),
+            "mcsgo_price": round(sell_price, 2),
             "net": round(net, 2),
             "margin": round(margin, 1),
             "volume": sold24h,
@@ -529,7 +519,10 @@ async def _cancel_and_menu(update: Update,
 async def start_buyorders(update: Update,
                           ctx: ContextTypes.DEFAULT_TYPE):
     """Начало — спрашиваем объём."""
-    ctx.user_data["bo_excludes"] = set()
+    ctx.user_data["bo_excludes"] = {
+        "knives", "cases", "capsules", "stickers",
+        "graffiti", "patches", "agents", "pins"
+    }
     await update.message.reply_text(
         "📊 <b>Создание БД STM-MCS</b>\n\n"
         "Введи общий объём ордеров ($):\n"
@@ -579,7 +572,7 @@ async def toggle_exclude(update: Update,
         await q.message.edit_text(
             f"✅ Исключено: {excl_text}\n\n"
             f"Введи <b>минимальную</b> цену ордера ($):\n"
-            f"<i>Например: 0.20</i>",
+            f"<i>По умолчанию: 0.50</i>",
             parse_mode="HTML")
         return ST_MIN_PRICE
 
@@ -599,20 +592,23 @@ async def got_min_price(update: Update,
                         ctx: ContextTypes.DEFAULT_TYPE):
     """Получили мин. цену → спрашиваем макс."""
     text = update.message.text.strip().replace("$", "").replace(",", ".")
-    try:
-        min_price = float(text)
-        if min_price < 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("❌ Введи число ≥ 0")
-        return ST_MIN_PRICE
+    if text in (".", "", "д", "ок"):
+        min_price = 0.50  # дефолт
+    else:
+        try:
+            min_price = float(text)
+            if min_price < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ Введи число ≥ 0")
+            return ST_MIN_PRICE
 
     ctx.user_data["bo_min_price"] = min_price
 
     await update.message.reply_text(
         f"✅ Мин. цена: <b>${min_price:.2f}</b>\n\n"
         f"Введи <b>максимальную</b> цену ордера ($):\n"
-        f"<i>Например: 10.00</i>",
+        f"<i>По умолчанию: 10.00</i>",
         parse_mode="HTML")
     return ST_MAX_PRICE
 
@@ -621,13 +617,16 @@ async def got_max_price(update: Update,
                         ctx: ContextTypes.DEFAULT_TYPE):
     """Получили макс. цену → генерируем Excel."""
     text = update.message.text.strip().replace("$", "").replace(",", ".")
-    try:
-        max_price = float(text)
-        if max_price <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("❌ Введи число > 0")
-        return ST_MAX_PRICE
+    if text in (".", "", "д", "ок"):
+        max_price = 10.0  # дефолт
+    else:
+        try:
+            max_price = float(text)
+            if max_price <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ Введи число > 0")
+            return ST_MAX_PRICE
 
     min_price = ctx.user_data.get("bo_min_price", 0)
     if max_price <= min_price:
