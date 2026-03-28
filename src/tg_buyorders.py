@@ -58,6 +58,7 @@ OUTPUT_DIR = os.path.expanduser(
 ANTIBOOST_TREND_THRESHOLD = -10.0    # med7d vs med30d (было -20%)
 ANTIBOOST_VELOCITY_THRESHOLD = -5.0  # latest vs med7d (было -7%)
 ANTIBOOST_MIN_SOLD_24H = 20          # минимум ликвидность (было 5)
+MIN_AGE_DAYS = 180                   # минимум 6 месяцев на рынке
 
 
 def _excludes_kb(excluded: set) -> InlineKeyboardMarkup:
@@ -255,6 +256,27 @@ def _antiboost_check(item: dict) -> tuple[bool, list[str]]:
     return passed, reasons
 
 
+def _is_too_young(item: dict) -> bool:
+    """Проверить что предмет младше MIN_AGE_DAYS (6 месяцев)."""
+    from datetime import datetime, timezone
+    
+    # firstseenat — ISO формат: "2018-08-22T23:00:00+00:00"
+    first_seen = item.get("firstseenat", "")
+    if not first_seen:
+        return False  # нет данных — пропускаем фильтр
+    
+    try:
+        if isinstance(first_seen, str):
+            seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+        else:
+            return False
+        
+        age_days = (datetime.now(timezone.utc) - seen_dt).days
+        return age_days < MIN_AGE_DAYS
+    except Exception:
+        return False
+
+
 def _should_exclude(name: str, excluded: set) -> bool:
     """Проверить нужно ли исключить предмет."""
     for key, _, patterns in CATEGORIES:
@@ -277,7 +299,7 @@ def _build_items(raw_items: list, excluded: set,
     
     stats = {"total": 0, "no_buy": 0, "no_steam": 0, "low_sold": 0,
              "price_filter": 0, "excluded_cat": 0, "no_mcsgo": 0,
-             "antiboost": 0, "no_margin": 0, "passed": 0}
+             "too_young": 0, "antiboost": 0, "no_margin": 0, "passed": 0}
 
     for item in raw_items:
         name = item.get("markethashname", "")
@@ -315,6 +337,11 @@ def _build_items(raw_items: list, excluded: set,
             stats["no_mcsgo"] += 1
             continue
 
+        # ✅ Проверка возраста (минимум 6 месяцев)
+        if _is_too_young(item):
+            stats["too_young"] += 1
+            continue
+
         # ✅ Антибуст (ужесточённый)
         ab_passed, ab_reasons = _antiboost_check(item)
         if not ab_passed:
@@ -330,6 +357,7 @@ def _build_items(raw_items: list, excluded: set,
 
         steam_url = (f"https://steamcommunity.com/market/listings/"
                      f"{APP_ID}/{quote(name)}")
+        mcsgo_url = f"https://market.csgo.com/?s=&search={quote(name)}"
 
         stats["passed"] += 1
         results.append({
@@ -340,16 +368,17 @@ def _build_items(raw_items: list, excluded: set,
             "margin": round(margin, 1),
             "volume": sold24h,
             "url": steam_url,
+            "mcsgo_url": mcsgo_url,
         })
 
     # Логируем статистику фильтрации
     log.info("📊 Фильтрация: всего=%d, нет buy=%d, нет steam=%d, "
              "мало sold=%d, цена=%d, категория=%d, нет MCS=%d, "
-             "антибуст=%d, нет маржи=%d → прошли=%d",
+             "молодой=%d, антибуст=%d, нет маржи=%d → прошли=%d",
              stats["total"], stats["no_buy"], stats["no_steam"],
              stats["low_sold"], stats["price_filter"], stats["excluded_cat"],
-             stats["no_mcsgo"], stats["antiboost"], stats["no_margin"],
-             stats["passed"])
+             stats["no_mcsgo"], stats["too_young"], stats["antiboost"],
+             stats["no_margin"], stats["passed"])
     
     # Сортировка по марже
     results.sort(key=lambda x: x["margin"], reverse=True)
@@ -418,7 +447,8 @@ def _generate_excel(items: list, params: dict) -> str:
 
     # Заголовки
     headers = ["№", "App ID", "Название", "Ссылка Steam",
-               "Buy Order ($)", "Кол-во", "Маржа %", "Объём 24ч"]
+               "Ссылка MarketCSGO", "Buy Order ($)", "Кол-во",
+               "Маржа %", "Объём 24ч"]
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=2, column=col, value=header)
         cell.font = hdr_font
@@ -439,25 +469,30 @@ def _generate_excel(items: list, params: dict) -> str:
         url_cell.font = Font(color="0563C1", underline="single")
         url_cell.border = border
 
-        ws.cell(row=row, column=5, value=item["buy_order"]).border = border
-        ws.cell(row=row, column=6, value=item.get("qty", 1)).border = border
+        mcsgo_cell = ws.cell(row=row, column=5, value=item.get("mcsgo_url", ""))
+        mcsgo_cell.hyperlink = item.get("mcsgo_url", "")
+        mcsgo_cell.font = Font(color="0563C1", underline="single")
+        mcsgo_cell.border = border
 
-        margin_cell = ws.cell(row=row, column=7, value=item["margin"])
+        ws.cell(row=row, column=6, value=item["buy_order"]).border = border
+        ws.cell(row=row, column=7, value=item.get("qty", 1)).border = border
+
+        margin_cell = ws.cell(row=row, column=8, value=item["margin"])
         margin_cell.border = border
         if item["margin"] >= 20:
             margin_cell.fill = green_fill
         elif item["margin"] >= 10:
             margin_cell.fill = yellow_fill
 
-        ws.cell(row=row, column=8, value=item["volume"]).border = border
+        ws.cell(row=row, column=9, value=item["volume"]).border = border
 
         total_cost += item["buy_order"] * item.get("qty", 1)
 
     # Итого
     total_row = len(items) + 3
-    ws.cell(row=total_row, column=4, value="ИТОГО:").font = Font(bold=True)
-    ws.cell(row=total_row, column=5, value=round(total_cost, 2)).font = Font(bold=True)
-    ws.cell(row=total_row, column=6,
+    ws.cell(row=total_row, column=5, value="ИТОГО:").font = Font(bold=True)
+    ws.cell(row=total_row, column=6, value=round(total_cost, 2)).font = Font(bold=True)
+    ws.cell(row=total_row, column=7,
             value=sum(it.get("qty", 1) for it in items)).font = Font(bold=True)
 
     # Ширина колонок
@@ -465,10 +500,11 @@ def _generate_excel(items: list, params: dict) -> str:
     ws.column_dimensions["B"].width = 8
     ws.column_dimensions["C"].width = 45
     ws.column_dimensions["D"].width = 55
-    ws.column_dimensions["E"].width = 14
-    ws.column_dimensions["F"].width = 8
-    ws.column_dimensions["G"].width = 10
+    ws.column_dimensions["E"].width = 55
+    ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 8
     ws.column_dimensions["H"].width = 10
+    ws.column_dimensions["I"].width = 10
 
     wb.save(filepath)
     log.info("Excel сохранён: %s (%d предметов, $%.2f)",
@@ -479,6 +515,16 @@ def _generate_excel(items: list, params: dict) -> str:
 # ============================================================
 # ConversationHandler
 # ============================================================
+
+async def _cancel_and_menu(update: Update,
+                           ctx: ContextTypes.DEFAULT_TYPE):
+    """Выход из диалога при нажатии кнопки меню."""
+    ctx.user_data.clear()
+    # Передаём обработку в основной handle_text
+    from tg_handlers import handle_text
+    await handle_text(update, ctx)
+    return ConversationHandler.END
+
 
 async def start_buyorders(update: Update,
                           ctx: ContextTypes.DEFAULT_TYPE):
@@ -689,8 +735,14 @@ def get_conversation_handler() -> ConversationHandler:
             ],
         },
         fallbacks=[
+            MessageHandler(filters.Regex(r"^📊 Создать БД STM-MCS$"),
+                           start_buyorders),
+            MessageHandler(
+                filters.Regex(r"^(📊 Инвестиции|🔄 Круги|🌐 Прокси|⚙️ Настройки)$"),
+                _cancel_and_menu),
             MessageHandler(filters.Regex(r"^/cancel$"),
                            cancel_buyorders),
         ],
         per_message=False,
+        allow_reentry=True,
     )

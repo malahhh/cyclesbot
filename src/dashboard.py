@@ -166,15 +166,28 @@ def circles_text() -> str:
         except (ValueError, IndexError):
             pass
 
-        items_cnt = 0
-        steam_val = 0.0
-        for app_id in (730, 570):
-            inv = db.get_inventory(acc["steam_id"], app_id)
-            if inv and inv["items_count"] > 0:
-                items_cnt += inv["items_count"]
-                steam_val += inv["total_value"]
-        cnt_s = str(items_cnt) if items_cnt else "??"
-        val_s = f"${steam_val:.2f}" if steam_val > 0 else "??"
+        cs2_count, cs2_value = 0, 0.0
+        dota_count, dota_value = 0, 0.0
+        inv_cs2 = db.get_inventory(acc["steam_id"], 730)
+        if inv_cs2 and inv_cs2["items_count"] > 0:
+            cs2_count = inv_cs2["items_count"]
+            cs2_value = inv_cs2["total_value"]
+        inv_dota = db.get_inventory(acc["steam_id"], 570)
+        if inv_dota and inv_dota["items_count"] > 0:
+            dota_count = inv_dota["items_count"]
+            dota_value = inv_dota["total_value"]
+        total_count = cs2_count + dota_count
+        total_value = cs2_value + dota_value
+        
+        inv_lines = []
+        if cs2_count > 0:
+            inv_lines.append(f"📦 CS2: {cs2_count} шт | 💵 ${cs2_value:.2f}")
+        if dota_count > 0:
+            inv_lines.append(f"📦 Dota2: {dota_count} шт | 💵 ${dota_value:.2f}")
+        if not inv_lines:
+            inv_lines.append("📦 Предметов: ??")
+        inv_text = "\n".join(inv_lines)
+        total_s = f"💵 Общая оценка: ${total_value:.2f}" if total_value > 0 else "💵 Общая оценка: ??"
 
         # След. обновление
         import time as _time
@@ -210,8 +223,8 @@ def circles_text() -> str:
             f"🟦 Круг #{acc['id']} — Аккаунт: {acc['login']}\n"
             f"📅 Создан: {created_s}{duration_s}\n"
             f"💰 Вложено: {acc['amount'] or '??'}\n"
-            f"📦 Количество предметов: {cnt_s} | "
-            f"💵 Оценка Steam: {val_s}\n"
+            f"{inv_text}\n"
+            f"{total_s}\n"
             f"🔁 Схема: {acc['scheme'] or '??'}\n"
             f"⚠️ Статус схемы: {acc['check_note'] or '??'}\n"
             f"📝 Примечание: {acc['status'] or '??'}\n"
@@ -225,7 +238,7 @@ def circles_text() -> str:
 
 def history_text() -> str:
     """Текст раздела История (завершённые круги)."""
-    accs = db.get_circle_accounts()
+    accs = db.get_circle_accounts(include_done=True)
     done = [a for a in accs if a["status"] == "done"]
     if not done:
         return "📜 <b>История</b>\n\nНет завершённых кругов."

@@ -71,15 +71,35 @@ def _invest_kb(page: int = 0) -> InlineKeyboardMarkup:
 
 def _circle_card(acc: dict) -> str:
     """Карточка аккаунта круга."""
-    items_count = 0
-    total_value = 0.0
-    for app_id in (730, 570):
-        inv = db.get_inventory(acc["steam_id"], app_id)
-        if inv and inv["items_count"] > 0:
-            items_count += inv["items_count"]
-            total_value += inv["total_value"]
-    cnt_s = str(items_count) if items_count else "??"
-    val_s = f"${total_value:.2f}" if total_value > 0 else "??"
+    cs2_count, cs2_value = 0, 0.0
+    dota_count, dota_value = 0, 0.0
+    
+    inv_cs2 = db.get_inventory(acc["steam_id"], 730)
+    if inv_cs2 and inv_cs2["items_count"] > 0:
+        cs2_count = inv_cs2["items_count"]
+        cs2_value = inv_cs2["total_value"]
+    
+    inv_dota = db.get_inventory(acc["steam_id"], 570)
+    if inv_dota and inv_dota["items_count"] > 0:
+        dota_count = inv_dota["items_count"]
+        dota_value = inv_dota["total_value"]
+    
+    total_count = cs2_count + dota_count
+    total_value = cs2_value + dota_value
+    
+    # Формируем строки по играм
+    inv_lines = []
+    if cs2_count > 0:
+        inv_lines.append(
+            f"📦 CS2: {cs2_count} шт | 💵 ${cs2_value:.2f}")
+    if dota_count > 0:
+        inv_lines.append(
+            f"📦 Dota2: {dota_count} шт | 💵 ${dota_value:.2f}")
+    if not inv_lines:
+        inv_lines.append("📦 Предметов: ??")
+    
+    total_s = f"💵 Общая оценка Steam: ${total_value:.2f}" if total_value > 0 else "💵 Общая оценка Steam: ??"
+    
     from datetime import datetime, timezone, timedelta
     import time as _time
     _MSK = timezone(timedelta(hours=3))
@@ -94,11 +114,13 @@ def _circle_card(acc: dict) -> str:
             next_s = "скоро"
     else:
         next_s = "??"
+    
+    inv_text = "\n".join(inv_lines)
     return (
         f"🟦 Круг #{acc['id']} — Аккаунт: <b>{acc['login']}</b>\n"
         f"💰 Вложено: {acc['amount'] or '??'}\n"
-        f"📦 Количество предметов: {cnt_s} | "
-        f"💵 Оценка Steam: {val_s}\n"
+        f"{inv_text}\n"
+        f"{total_s}\n"
         f"🔁 Схема: {acc['scheme'] or '??'}\n"
         f"⚠️ Статус схемы: {acc['check_note'] or '??'}\n"
         f"📝 Примечание: {acc['status'] or '??'}\n"
@@ -205,7 +227,7 @@ async def on_callback(update: Update,
 
     elif data == "back":
         inv_accs = db.get_invest_accounts()
-        cir_accs = db.get_circle_accounts()
+        cir_accs = db.get_circle_accounts(include_done=True)
         active = len([a for a in cir_accs
                       if a["status"] in ("buy", "hold")])
         done = len([a for a in cir_accs if a["status"] == "done"])
