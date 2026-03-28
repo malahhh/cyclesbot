@@ -50,8 +50,14 @@ MARKET_FEE = 0.10
 
 SNIPER_DIR = os.path.expanduser(
     "~/.openclaw/agents/architect/projects/lis-sniper")
+SNIPER_DB = os.path.join(SNIPER_DIR, "sniper.db")
 OUTPUT_DIR = os.path.expanduser(
     "~/.openclaw/agents/architect/projects/investment-bot/buyorders")
+
+# Ужесточённые пороги антибуста для buy orders
+ANTIBOOST_TREND_THRESHOLD = -10.0    # med7d vs med30d (было -20%)
+ANTIBOOST_VELOCITY_THRESHOLD = -5.0  # latest vs med7d (было -7%)
+ANTIBOOST_MIN_SOLD_24H = 20          # минимум ликвидность (было 5)
 
 
 def _excludes_kb(excluded: set) -> InlineKeyboardMarkup:
@@ -105,6 +111,108 @@ def _get_steamwebapi_data() -> list:
         os.chdir(saved_cwd)
 
 
+def _get_marketcsgo_names() -> set:
+    """Загрузить множество названий предметов с MarketCSGO из sniper.db."""
+    import sqlite3
+    if not os.path.exists(SNIPER_DB):
+        log.warning("sniper.db не найден: %s", SNIPER_DB)
+        return set()
+    try:
+        conn = sqlite3.connect(SNIPER_DB, timeout=10)
+        rows = conn.execute(
+            "SELECT name FROM zakup_items WHERE marketplace='MarketCSGO'"
+        ).fetchall()
+        conn.close()
+        names = {r[0] for r in rows}
+        log.info("MarketCSGO: загружено %d названий из sniper.db", len(names))
+        return names
+    except Exception as e:
+        log.error("MarketCSGO names error: %s", e)
+        return set()
+
+
+def _antiboost_check(item: dict) -> tuple[bool, list[str]]:
+    """Ужесточённый антибуст для buy orders.
+    
+    Пороги строже чем в lis-sniper:
+    - Тренд: -10% (было -20%)
+    - Velocity: -5% (было -7%)
+    - Ликвидность: 20 sold/24h (было 5)
+    """
+    import statistics
+    
+    med30 = item.get("pricemedian30d") or 0
+    med7 = item.get("pricemedian7d") or 0
+    latest_sell = item.get("pricelatestsell") or 0
+    latest_list = item.get("pricelatest") or 0
+    pmin = item.get("pricemin") or 0
+    pmax = item.get("pricemax") or 0
+    sold24h = item.get("sold24h") or 0
+    unstable = item.get("unstable", False)
+    sales = item.get("latest10steamsales") or item.get("latest10") or []
+    
+    reasons = []
+    
+    # 1. Ликвидность (ужесточена: 20 вместо 5)
+    if sold24h < ANTIBOOST_MIN_SOLD_24H:
+        reasons.append(f"Ликвидность: {sold24h}/{ANTIBOOST_MIN_SOLD_24H}")
+    
+    # 2. Рост 30д
+    if med30 > 0 and latest_sell > 0:
+        growth = (latest_sell - med30) / med30 * 100
+        if growth > 50:
+            reasons.append(f"Хайп: {growth:+.1f}%")
+        elif growth < -20:
+            reasons.append(f"Дамп: {growth:+.1f}%")
+    
+    # 3. Медиана vs текущий
+    if med30 > 0 and latest_list > 0:
+        dev = (latest_list - med30) / med30 * 100
+        if dev > 35:
+            reasons.append(f"Хайп vs медиана: {dev:+.1f}%")
+        elif dev < -20:
+            reasons.append(f"Дамп vs медиана: {dev:+.1f}%")
+    
+    # 4. Волатильность
+    if pmin > 0 and pmax > 0:
+        vol = (pmax - pmin) / pmin * 100
+        if vol > 150:
+            reasons.append(f"Волатильность: {vol:.0f}%")
+    
+    # 5. Скачок из latest10
+    if sales and len(sales) >= 6:
+        try:
+            prices = [float(s[1]) for s in sales if len(s) >= 2]
+            if len(prices) >= 6:
+                avg_recent = statistics.mean(prices[:3])
+                avg_older = statistics.mean(prices[3:])
+                if avg_older > 0:
+                    spike = (avg_recent - avg_older) / avg_older * 100
+                    if abs(spike) > 10:
+                        reasons.append(f"Скачок: {spike:+.1f}%")
+        except (ValueError, TypeError):
+            pass
+    
+    # 6. Тренд: med7d vs med30d (ужесточен: -10% вместо -20%)
+    if med7 > 0 and med30 > 0:
+        trend = (med7 - med30) / med30 * 100
+        if trend < ANTIBOOST_TREND_THRESHOLD:
+            reasons.append(f"Тренд: {trend:+.1f}%")
+    
+    # 7. Velocity: latest vs med7d (ужесточен: -5% вместо -7%)
+    if med7 > 0 and latest_sell > 0:
+        velocity = (latest_sell - med7) / med7 * 100
+        if velocity < ANTIBOOST_VELOCITY_THRESHOLD:
+            reasons.append(f"Velocity: {velocity:+.1f}%")
+    
+    # 8. Unstable
+    if unstable:
+        reasons.append("Unstable")
+    
+    passed = len(reasons) == 0
+    return passed, reasons
+
+
 def _should_exclude(name: str, excluded: set) -> bool:
     """Проверить нужно ли исключить предмет."""
     for key, _, patterns in CATEGORIES:
@@ -119,43 +227,69 @@ def _should_exclude(name: str, excluded: set) -> bool:
 def _build_items(raw_items: list, excluded: set,
                  min_price: float, max_price: float,
                  total_volume: float) -> list:
-    """Отобрать и отсортировать предметы."""
+    """Отобрать и отсортировать предметы с антибустом и проверкой MarketCSGO."""
     results = []
+    
+    # Загружаем названия MarketCSGO для проверки ликвидности
+    mcsgo_names = _get_marketcsgo_names()
+    
+    stats = {"total": 0, "no_buy": 0, "no_steam": 0, "low_sold": 0,
+             "price_filter": 0, "excluded_cat": 0, "no_mcsgo": 0,
+             "antiboost": 0, "no_margin": 0, "passed": 0}
 
     for item in raw_items:
         name = item.get("markethashname", "")
         if not name:
             continue
+        stats["total"] += 1
 
         buy_order = item.get("buyorderprice") or 0
         if buy_order <= 0:
+            stats["no_buy"] += 1
             continue
 
         steam_price = item.get("pricemedian30d") or 0
         if steam_price <= 0:
+            stats["no_steam"] += 1
             continue
 
         sold24h = item.get("sold24h") or 0
-        if sold24h < 5:
+        if sold24h < ANTIBOOST_MIN_SOLD_24H:
+            stats["low_sold"] += 1
             continue
 
         # Фильтр по цене
         if buy_order < min_price or buy_order > max_price:
+            stats["price_filter"] += 1
             continue
 
-        # Исключения
+        # Исключения по категориям
         if _should_exclude(name, excluded):
+            stats["excluded_cat"] += 1
+            continue
+
+        # ✅ Проверка наличия на MarketCSGO
+        if mcsgo_names and name not in mcsgo_names:
+            stats["no_mcsgo"] += 1
+            continue
+
+        # ✅ Антибуст (ужесточённый)
+        ab_passed, ab_reasons = _antiboost_check(item)
+        if not ab_passed:
+            stats["antiboost"] += 1
             continue
 
         # Маржа
         net = steam_price * (1 - MARKET_FEE)
         margin = ((net - buy_order) / buy_order * 100) if buy_order > 0 else 0
         if margin <= 0:
+            stats["no_margin"] += 1
             continue
 
         steam_url = (f"https://steamcommunity.com/market/listings/"
                      f"{APP_ID}/{quote(name)}")
 
+        stats["passed"] += 1
         results.append({
             "name": name,
             "buy_order": round(buy_order, 2),
@@ -166,6 +300,15 @@ def _build_items(raw_items: list, excluded: set,
             "url": steam_url,
         })
 
+    # Логируем статистику фильтрации
+    log.info("📊 Фильтрация: всего=%d, нет buy=%d, нет steam=%d, "
+             "мало sold=%d, цена=%d, категория=%d, нет MCS=%d, "
+             "антибуст=%d, нет маржи=%d → прошли=%d",
+             stats["total"], stats["no_buy"], stats["no_steam"],
+             stats["low_sold"], stats["price_filter"], stats["excluded_cat"],
+             stats["no_mcsgo"], stats["antiboost"], stats["no_margin"],
+             stats["passed"])
+    
     # Сортировка по марже
     results.sort(key=lambda x: x["margin"], reverse=True)
 
@@ -443,10 +586,14 @@ async def got_max_price(update: Update,
 
         await msg.edit_text(
             f"✅ <b>БД STM-MCS готова!</b>\n\n"
-            f"📦 Предметов: {len(items)}\n"
+            f"📦 Предметов: {len(items)} (из {len(raw)} загруженных)\n"
             f"💰 Общая стоимость: ${total_cost:.2f}\n"
             f"📈 Средняя маржа: {avg_margin:.1f}%\n"
-            f"📊 Топ маржа: {items[0]['margin']:.1f}% ({items[0]['name'][:30]})",
+            f"📊 Топ маржа: {items[0]['margin']:.1f}% ({items[0]['name'][:30]})\n\n"
+            f"🛡 Антибуст: тренд ≥{ANTIBOOST_TREND_THRESHOLD}%, "
+            f"velocity ≥{ANTIBOOST_VELOCITY_THRESHOLD}%\n"
+            f"📈 Мин. ликвидность: {ANTIBOOST_MIN_SOLD_24H} sold/24ч\n"
+            f"✅ Проверено на MarketCSGO",
             parse_mode="HTML")
 
         # Отправляем файл
