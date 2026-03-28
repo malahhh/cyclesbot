@@ -83,7 +83,8 @@ async def show_proxy_section_from_callback(q):
     lines = ["🌐 <b>Прокси</b>\n"]
     binding_map = {b["account_login"]: b for b in bindings}
 
-    def _format_acc(login):
+    def _format_acc(login, acc_id=None):
+        prefix = f"№{acc_id} " if acc_id else ""
         b = binding_map.get(login)
         if b:
             proxy = _find_proxy(proxies, b["proxy_id"])
@@ -101,9 +102,9 @@ async def show_proxy_section_from_callback(q):
                 else:
                     sq = "🟥"
                 
-                return f"{sq} {login} — {ip}:{port} ({country}) — до {date_end} ({days}д)"
-            return f"🟦 {login} — proxy не найден"
-        return f"🟦 {login} — нет прокси"
+                return f"{sq} {prefix}{login} — {ip}:{port} ({country}) — до {date_end} ({days}д)"
+            return f"🟦 {prefix}{login} — proxy не найден"
+        return f"🟦 {prefix}{login} — нет прокси"
 
     invest_accs = db.get_invest_accounts()
     circle_accs = db.get_circle_accounts()
@@ -111,7 +112,7 @@ async def show_proxy_section_from_callback(q):
     if circle_accs:
         lines.append("🔄🔄🔄 КРУГИ 🔄🔄🔄\n")
         for a in circle_accs:
-            lines.append(_format_acc(a["login"]))
+            lines.append(_format_acc(a["login"], a["id"]))
         lines.append("\n—————————————")
 
     if invest_accs:
@@ -139,7 +140,8 @@ async def show_proxy_section(update: Update,
     lines = ["🌐 <b>Прокси</b>\n"]
     binding_map = {b["account_login"]: b for b in bindings}
 
-    def _format_acc(login):
+    def _format_acc(login, acc_id=None):
+        prefix = f"№{acc_id} " if acc_id else ""
         b = binding_map.get(login)
         if b:
             proxy = _find_proxy(proxies, b["proxy_id"])
@@ -157,9 +159,9 @@ async def show_proxy_section(update: Update,
                 else:
                     sq = "🟥"
                 
-                return f"{sq} {login} — {ip}:{port} ({country}) — до {date_end} ({days}д)"
-            return f"🟦 {login} — proxy не найден"
-        return f"🟦 {login} — нет прокси"
+                return f"{sq} {prefix}{login} — {ip}:{port} ({country}) — до {date_end} ({days}д)"
+            return f"🟦 {prefix}{login} — proxy не найден"
+        return f"🟦 {prefix}{login} — нет прокси"
 
     # Разделяем на КРУГИ и ИНВЕСТИЦИИ
     circle_accs = db.get_circle_accounts()
@@ -168,7 +170,7 @@ async def show_proxy_section(update: Update,
     if circle_accs:
         lines.append("🔄🔄🔄 КРУГИ 🔄🔄🔄\n")
         for a in circle_accs:
-            lines.append(_format_acc(a["login"]))
+            lines.append(_format_acc(a["login"], a["id"]))
         lines.append("\n—————————————\n")
 
     if invest_accs:
