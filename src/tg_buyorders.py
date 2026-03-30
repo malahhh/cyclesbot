@@ -286,6 +286,7 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                 continue
             
             for name, info in data.get("data", {}).items():
+                checked.add(name)
                 history = info.get("history", [])
                 if not history:
                     continue
@@ -400,8 +401,9 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
     # Retry цикл — до 99% покрытия или пока улучшается
     max_retries = 5
     for retry_num in range(1, max_retries + 1):
-        missing = [n for n in names if n not in result]
-        coverage = len(result) / len(names) * 100 if names else 100
+        missing = [n for n in names if n not in result and n not in checked]
+        total_processed = len(result) + len(checked)
+        coverage = total_processed / len(names) * 100 if names else 100
         if coverage >= 99 or not missing:
             break
         
@@ -441,6 +443,7 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                     time.sleep(MCSGO_RATE_LIMIT)
                     continue
                 for name, info in data.get("data", {}).items():
+                    checked.add(name)
                     history = info.get("history", [])
                     if not history:
                         continue
@@ -448,10 +451,7 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                     if not all_prices:
                         continue
                     now_ts = time.time()
-                    sales_7d = sum(1 for e in history
-                                   if len(e) >= 2 and (now_ts - int(e[0])) <= 7*86400)
-                    if sales_7d < 5:
-                        continue
+                    # sales_7d фильтр убран в retry — ликвидность уже проверена в Фазе 1
                     prices_7d = [float(e[1]) for e in history
                                  if len(e) >= 2 and (now_ts - int(e[0])) <= 7*86400]
                     med7 = statistics.median(prices_7d) if prices_7d else all_prices[0]
@@ -485,8 +485,10 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
             log.info("MarketCSGO retry: нет улучшений, стоп")
             break
     
-    log.info("MarketCSGO API: готово, %d/%d цен получено (%.0f%%)",
-             len(result), len(names), len(result) / len(names) * 100 if names else 0)
+    log.info("MarketCSGO API: готово, %d/%d цен, %d checked, %d без ответа API (%.0f%% покрытие)",
+             len(result), len(names), len(checked),
+             len(names) - len(checked),
+             len(checked) / len(names) * 100 if names else 0)
     return result
 
 
@@ -699,11 +701,8 @@ def _build_items(raw_items: list, excluded: set,
         
         ref_price = ref_prices.get(name)
         if not ref_price or ref_price <= 0:
-            # Fallback: Steam median price (есть у всех кандидатов)
-            ref_price = c.get("steam_price", 0)
-            if not ref_price or ref_price <= 0:
-                stats["no_ref_price"] += 1
-                continue
+            stats["no_ref_price"] += 1
+            continue
         
         net = ref_price * (1 - MARKET_FEE)
         margin = ((net - buy_price) / buy_price * 100) if buy_price > 0 else 0
