@@ -29,7 +29,7 @@ from telegram.ext import (ContextTypes, ConversationHandler,
 log = logging.getLogger("invest")
 
 # States
-ST_VOLUME, ST_EXCLUDES, ST_MIN_PRICE, ST_MAX_PRICE, ST_DISCOUNT, ST_MIN_PROFIT, ST_NEW_KEY = range(7)
+ST_VOLUME, ST_EXCLUDES, ST_MIN_PRICE, ST_MAX_PRICE, ST_DISCOUNT, ST_MIN_PROFIT, ST_NEW_KEY, ST_MODE = range(8)
 
 # Категории для исключения
 CATEGORIES = [
@@ -815,12 +815,15 @@ def _build_items(raw_items: list, excluded: set,
                  total_volume: float,
                  discount: float = 0,
                  min_profit: float = 0,
-                 progress_cb=None) -> list:
+                 progress_cb=None,
+                 fast_mode: bool = False) -> list:
     """Отобрать и отсортировать предметы с антибустом и проверкой MarketCSGO.
     
     Двухфазная фильтрация:
     1. Быстрая фильтрация (SteamWebAPI + bulk names) → кандидаты
     2. Batch запрос ref-цен MarketCSGO API → финальный расчёт маржи
+    
+    fast_mode=True: пропускает Фазу 2, использует bulk avg/price как ref.
     """
     # Фаза 1: быстрая фильтрация
     mcsgo_names = _get_marketcsgo_names()
@@ -849,7 +852,8 @@ def _build_items(raw_items: list, excluded: set,
             continue
 
         sold24h = item.get("sold24h") or 0
-        if sold24h < ANTIBOOST_MIN_SOLD_24H:
+        min_sold = 10 if fast_mode else ANTIBOOST_MIN_SOLD_24H
+        if sold24h < min_sold:
             stats["low_sold"] += 1
             continue
 
@@ -892,16 +896,30 @@ def _build_items(raw_items: list, excluded: set,
     if not candidates:
         return []
 
-    # Фаза 2: получаем ref-цены MarketCSGO API (batch по 50)
-    if progress_cb:
-        progress_cb(f"⏳ Получаю цены MarketCSGO ({len(candidates)} предметов)...")
-    
-    candidate_names = [c["name"] for c in candidates]
-    ref_prices = _get_mcsgo_ref_prices(candidate_names)
-    
-    # Проверка ошибки API ключа
-    if isinstance(ref_prices, dict) and "error" in ref_prices:
-        return ref_prices  # вернём ошибку наверх
+    if fast_mode:
+        # ⚡ Быстрый режим: ref-цены из bulk cache (avg_price / price)
+        log.info("⚡ Быстрый режим: %d кандидатов, цены из bulk cache", len(candidates))
+        ref_prices = {}
+        for c in candidates:
+            bulk = _mcsgo_bulk_prices_cache.get(c["name"], {})
+            if isinstance(bulk, dict):
+                avg = bulk.get("avg", 0)
+                price = bulk.get("price", 0)
+                # Приоритет: avg (недельная медиана), fallback на price (мин. листинг)
+                ref = avg if avg > 0 else price
+                if ref > 0:
+                    ref_prices[c["name"]] = ref
+    else:
+        # Фаза 2: получаем ref-цены MarketCSGO API (batch по 50)
+        if progress_cb:
+            progress_cb(f"⏳ Получаю цены MarketCSGO ({len(candidates)} предметов)...")
+        
+        candidate_names = [c["name"] for c in candidates]
+        ref_prices = _get_mcsgo_ref_prices(candidate_names)
+        
+        # Проверка ошибки API ключа
+        if isinstance(ref_prices, dict) and "error" in ref_prices:
+            return ref_prices  # вернём ошибку наверх
     
     # Фаза 3: финальный расчёт маржи от ref-цен (с учётом скидки)
     discount_mult = 1 - (discount / 100) if discount > 0 else 1
@@ -1309,10 +1327,10 @@ async def got_discount(update: Update,
 
 async def got_min_profit(update: Update,
                          ctx: ContextTypes.DEFAULT_TYPE):
-    """Получили мин. прибыль → генерируем Excel."""
+    """Получили мін. прибыль → выбор режима."""
     text = update.message.text.strip().replace("%", "").replace(",", ".")
     if text in (".", "", "д", "ок"):
-        min_profit = 8.0  # дефолт 8%
+        min_profit = 8.0
     else:
         try:
             min_profit = float(text)
@@ -1323,39 +1341,51 @@ async def got_min_profit(update: Update,
             await update.message.reply_text("❌ Введи число (% прибыли)")
             return ST_MIN_PROFIT
 
+    ctx.user_data["bo_min_profit"] = min_profit
+
+    volume = ctx.user_data.get("bo_volume", 100)
+    min_price = ctx.user_data.get("bo_min_price", 0)
+    max_price = ctx.user_data.get("bo_max_price", 10)
+    discount = ctx.user_data.get("bo_discount", 0)
+
+    info = [f"💰 Объём: ${volume:.2f}",
+            f"📊 Цена: ${min_price:.2f} — ${max_price:.2f}"]
+    if discount > 0:
+        info.append(f"📉 Скидка: {discount:.0f}%")
+    info.append(f"📈 Мін. прибыль: {min_profit:.0f}%")
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ Быстрый отбор", callback_data="bo:mode:fast")],
+        [InlineKeyboardButton("🔍 Полная проверка", callback_data="bo:mode:full")],
+    ])
+
+    await update.message.reply_text(
+        f"📋 <b>Параметры:</b>\n" + "\n".join(info) + "\n\n"
+        f"<b>Выбери режим:</b>\n"
+        f"⚡ <b>Быстрый</b> — Steam + bulk MCSGO, секунды\n"
+        f"🔍 <b>Полный</b> — + батч-проверка MCSGO, ~5 мин",
+        parse_mode="HTML",
+        reply_markup=kb)
+    return ST_MODE
+
+
+async def _run_generation(msg, chat, ctx, fast_mode: bool):
+    """Общая логика генерации БО."""
+    mode_label = "⚡ Быстрый" if fast_mode else "🔍 Полный"
     volume = ctx.user_data.get("bo_volume", 100)
     excluded = ctx.user_data.get("bo_excludes", set())
     min_price = ctx.user_data.get("bo_min_price", 0)
     max_price = ctx.user_data.get("bo_max_price", 10)
     discount = ctx.user_data.get("bo_discount", 0)
+    min_profit = ctx.user_data.get("bo_min_profit", 8)
 
     params = {
-        "volume": volume,
-        "min_price": min_price,
-        "max_price": max_price,
-        "discount": discount,
-        "min_profit": min_profit,
-        "excluded": list(excluded),
+        "volume": volume, "min_price": min_price,
+        "max_price": max_price, "discount": discount,
+        "min_profit": min_profit, "excluded": list(excluded),
     }
 
-    info_lines = []
-    if discount > 0:
-        info_lines.append(f"📉 Скидка: {discount:.0f}%")
-    if min_profit > 0:
-        info_lines.append(f"📈 Мин. прибыль: {min_profit:.0f}%")
-    extra_text = "\n".join(info_lines)
-
-    # Отправляем "генерирую..."
-    msg = await update.message.reply_text(
-        f"⏳ <b>Генерирую БД STM-MCS...</b>\n\n"
-        f"💰 Объём: ${volume:.2f}\n"
-        f"📊 Цена: ${min_price:.2f} — ${max_price:.2f}\n"
-        f"{extra_text}\n"
-        f"🚫 Исключено: {len(excluded)} категорий",
-        parse_mode="HTML")
-
     try:
-        # Загружаем данные
         raw = _get_steamwebapi_data()
         if not raw:
             await msg.edit_text("❌ Не удалось загрузить данные SteamWebAPI")
@@ -1363,12 +1393,12 @@ async def got_min_profit(update: Update,
             return ConversationHandler.END
 
         items = _build_items(raw, excluded, min_price, max_price,
-                             volume, discount=discount, min_profit=min_profit)
+                             volume, discount=discount, min_profit=min_profit,
+                             fast_mode=fast_mode)
         if isinstance(items, dict) and "error" in items:
             if "Bad KEY" in items["error"] or "мертвы" in items["error"]:
                 await msg.edit_text(
                     f"❌ {items['error']}\n\n"
-                    f"🔑 Добавь новый ключ или проверь существующие\n"
                     f"Отправь новый API ключ MarketCSGO (USD):")
                 return ST_NEW_KEY
             await msg.edit_text(f"❌ {items['error']}")
@@ -1381,14 +1411,10 @@ async def got_min_profit(update: Update,
 
         filepath = _generate_excel(items, params)
 
-        # Сохраняем настройки для повтора
         _save_last_settings({
-            "volume": volume,
-            "min_price": min_price,
-            "max_price": max_price,
-            "discount": discount,
-            "min_profit": min_profit,
-            "excluded": list(excluded),
+            "volume": volume, "min_price": min_price,
+            "max_price": max_price, "discount": discount,
+            "min_profit": min_profit, "excluded": list(excluded),
         })
 
         total_cost = sum(it["buy_order"] * it.get("qty", 1) for it in items)
@@ -1398,32 +1424,33 @@ async def got_min_profit(update: Update,
         if discount > 0:
             rl.append(f"📉 Скидка: {discount:.0f}%")
         if min_profit > 0:
-            rl.append(f"📈 Мин. прибыль: {min_profit:.0f}%")
+            rl.append(f"📈 Мін. прибыль: {min_profit:.0f}%")
         extra_r = "\n".join(rl) + "\n" if rl else ""
 
+        source_label = "bulk MCSGO" if fast_mode else "батч MCSGO API"
+        sold_label = "10" if fast_mode else str(ANTIBOOST_MIN_SOLD_24H)
+
         await msg.edit_text(
-            f"✅ <b>БД STM-MCS готова!</b>\n\n"
+            f"✅ <b>БД STM-MCS готова! ({mode_label})</b>\n\n"
             f"📦 Предметов: {len(items)} (из {len(raw)} загруженных)\n"
             f"💰 Общая стоимость: ${total_cost:.2f}\n"
             f"📈 Средняя маржа: {avg_margin:.1f}%\n"
             f"📊 Топ маржа: {items[0]['margin']:.1f}% ({items[0]['name'][:30]})\n\n"
             f"{extra_r}"
-            f"🛡 Антибуст: тренд ≥{ANTIBOOST_TREND_THRESHOLD}%, "
-            f"velocity ≥{ANTIBOOST_VELOCITY_THRESHOLD}%\n"
-            f"📈 Мин. ликвидность: {ANTIBOOST_MIN_SOLD_24H} sold/24ч\n"
-            f"✅ Проверено на MarketCSGO",
+            f"🛡 Антибуст\n"
+            f"📈 Мін. ліквідність: {sold_label} sold/24ч\n"
+            f"📊 Цены: {source_label}",
             parse_mode="HTML")
 
-        # Отправляем файл
         keys_info = get_mcsgo_keys_info()
         alive_keys = sum(1 for k in keys_info if k["alive"])
         keys_status = f"🔑 {alive_keys}/{len(keys_info)} ключей"
 
         with open(filepath, "rb") as f:
-            await update.message.reply_document(
+            await chat.send_document(
                 document=f,
                 filename=os.path.basename(filepath),
-                caption=f"📊 Buy Orders | ${volume:.2f} | "
+                caption=f"📊 Buy Orders {mode_label} | ${volume:.2f} | "
                         f"{len(items)} предметов"
                         f"{f' | мін.прибыль {min_profit:.0f}%' if min_profit > 0 else ''}"
                         f"\n{keys_status}",
@@ -1439,95 +1466,66 @@ async def got_min_profit(update: Update,
     return ConversationHandler.END
 
 
+async def mode_selected(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Callback bo:mode:fast / bo:mode:full — запуск генерации."""
+    q = update.callback_query
+    await q.answer()
+    fast_mode = q.data == "bo:mode:fast"
+    mode_label = "⚡ Быстрый" if fast_mode else "🔍 Полный"
+    volume = ctx.user_data.get("bo_volume", 100)
+    min_profit = ctx.user_data.get("bo_min_profit", 8)
+
+    await q.edit_message_text(
+        f"⏳ <b>Генерирую БД STM-MCS ({mode_label})...</b>\n\n"
+        f"💰 ${volume:.2f} | прибыль ≥{min_profit:.0f}%",
+        parse_mode="HTML")
+
+    return await _run_generation(q.message, q.message.chat, ctx, fast_mode)
+
+
 async def repeat_last(update: Update,
                       ctx: ContextTypes.DEFAULT_TYPE):
-    """Повторить последние настройки — сразу генерация."""
+    """Повторить последние настройки — показать выбор режима."""
     query = update.callback_query
     await query.answer()
-    
+
     last = _load_last_settings()
     if not last:
         await query.edit_message_text("❌ Нет сохранённых настроек")
         return ConversationHandler.END
-    
+
     volume = last.get("volume", 100)
     excluded = set(last.get("excluded", []))
     min_price = last.get("min_price", 0.5)
     max_price = last.get("max_price", 10)
     discount = last.get("discount", 0)
     min_profit = last.get("min_profit", 8)
-    
+
     ctx.user_data["bo_volume"] = volume
     ctx.user_data["bo_excludes"] = excluded
     ctx.user_data["bo_min_price"] = min_price
     ctx.user_data["bo_max_price"] = max_price
     ctx.user_data["bo_discount"] = discount
-    
-    info_lines = []
+    ctx.user_data["bo_min_profit"] = min_profit
+
+    info = [f"💰 ${volume:.2f}", f"📊 ${min_price:.2f}-${max_price:.2f}"]
     if discount > 0:
-        info_lines.append(f"📉 Скидка: {discount:.0f}%")
-    if min_profit > 0:
-        info_lines.append(f"📈 Мин. прибыль: {min_profit:.0f}%")
-    extra_text = "\n".join(info_lines)
-    
-    msg = await query.edit_message_text(
-        f"⏳ <b>Генерирую БД STM-MCS (повтор)...</b>\n\n"
-        f"💰 Объём: ${volume:.2f}\n"
-        f"📊 Цена: ${min_price:.2f} — ${max_price:.2f}\n"
-        f"{extra_text}\n"
-        f"🚫 Исключено: {len(excluded)} категорий",
-        parse_mode="HTML")
-    
-    try:
-        raw = _get_steamwebapi_data()
-        if not raw:
-            await msg.edit_text("❌ Не удалось загрузить данные SteamWebAPI")
-            ctx.user_data.clear()
-            return ConversationHandler.END
-        
-        params = {
-            "volume": volume, "min_price": min_price,
-            "max_price": max_price, "discount": discount,
-            "min_profit": min_profit, "excluded": list(excluded),
-        }
-        
-        items = _build_items(raw, excluded, min_price, max_price,
-                             volume, discount=discount, min_profit=min_profit)
-        if isinstance(items, dict) and "error" in items:
-            if "Bad KEY" in items["error"] or "мертвы" in items["error"]:
-                await msg.edit_text(
-                    f"❌ {items['error']}\n\n"
-                    f"🔑 Добавь новый ключ или проверь существующие\n"
-                    f"Отправь новый API ключ MarketCSGO (USD):")
-                return ST_NEW_KEY
-            await msg.edit_text(f"❌ {items['error']}")
-            ctx.user_data.clear()
-            return ConversationHandler.END
-        if not items:
-            await msg.edit_text("❌ Нет предметов по заданным параметрам")
-            ctx.user_data.clear()
-            return ConversationHandler.END
-        
-        filepath = _generate_excel(items, params)
-        _save_last_settings(params)
-        
-        total_cost = sum(it["buy_order"] * it.get("qty", 1) for it in items)
-        avg_margin = sum(it["margin"] for it in items) / len(items)
-        
-        caption = (
-            f"📊 Buy Orders | ${volume:.2f} | {len(items)} предметов"
-            f" | мин.прибыль {min_profit:.0f}%")
-        
-        await msg.delete()
-        with open(filepath, "rb") as f:
-            await update.effective_chat.send_document(f, caption=caption)
-        
-    except Exception as e:
-        log.error("Repeat buyorders error: %s", e)
-        await msg.edit_text(f"❌ Ошибка: {e}")
-    
-    ctx.user_data.clear()
-    return ConversationHandler.END
+        info.append(f"📉 {discount:.0f}%")
+    info.append(f"📈 ≥{min_profit:.0f}%")
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ Быстрый отбор", callback_data="bo:mode:fast")],
+        [InlineKeyboardButton("🔍 Полная проверка", callback_data="bo:mode:full")],
+    ])
+
+    await query.edit_message_text(
+        f"📋 <b>Повтор ({' | '.join(info)})</b>\n\n"
+        f"<b>Выбери режим:</b>\n"
+        f"⚡ <b>Быстрый</b> — Steam + bulk MCSGO, секунды\n"
+        f"🔍 <b>Полный</b> — + батч-проверка MCSGO, ~5 мин",
+        parse_mode="HTML",
+        reply_markup=kb)
+    return ST_MODE
 
 
 async def cancel_buyorders(update: Update,
@@ -1565,77 +1563,24 @@ async def got_new_key(update: Update,
     info = get_mcsgo_keys_info()
     alive = sum(1 for k in info if k["alive"])
 
-    # Проверяем есть ли сохранённые параметры для перезапуска
     has_params = all(k in ctx.user_data for k in ("bo_volume", "bo_min_price", "bo_max_price"))
     if has_params:
-        volume = ctx.user_data["bo_volume"]
-        min_price = ctx.user_data["bo_min_price"]
-        max_price = ctx.user_data["bo_max_price"]
-        discount = ctx.user_data.get("bo_discount", 0)
-        min_profit = ctx.user_data.get("bo_min_profit", 8)
-        excluded = ctx.user_data.get("bo_excludes", set())
-
-        msg = await update.message.reply_text(
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚡ Быстрый отбор", callback_data="bo:mode:fast")],
+            [InlineKeyboardButton("🔍 Полная проверка", callback_data="bo:mode:full")],
+        ])
+        await update.message.reply_text(
             f"✅ Новый ключ применён: <code>{_mask_key(key)}</code>\n"
             f"🔑 Активных: {alive}\n\n"
-            f"⏳ Генерирую БО (${volume}, ${min_price}-${max_price}, "
-            f"мін {min_profit}%)...",
-            parse_mode="HTML")
-
-        # Запускаем генерацию напрямую
-        try:
-            raw = _get_steamwebapi_data()
-            if not raw:
-                await msg.edit_text("❌ Не удалось загрузить данные SteamWebAPI")
-                ctx.user_data.clear()
-                return ConversationHandler.END
-
-            items = _build_items(raw, excluded, min_price, max_price,
-                                 volume, discount=discount, min_profit=min_profit)
-            if isinstance(items, dict) and "error" in items:
-                await msg.edit_text(f"❌ {items['error']}")
-                ctx.user_data.clear()
-                return ConversationHandler.END
-            if not items:
-                await msg.edit_text("❌ Нет предметов по заданным параметрам")
-                ctx.user_data.clear()
-                return ConversationHandler.END
-
-            params = {
-                "volume": volume, "min_price": min_price,
-                "max_price": max_price, "discount": discount,
-                "min_profit": min_profit, "excluded": list(excluded),
-            }
-            filepath = _generate_excel(items, params)
-            await msg.edit_text(
-                f"✅ Готово! {len(items)} предметов\n"
-                f"📎 Отправляю файл...",
-                parse_mode="HTML")
-
-            keys_info2 = get_mcsgo_keys_info()
-            alive2 = sum(1 for k in keys_info2 if k["alive"])
-            with open(filepath, "rb") as f:
-                await update.message.reply_document(
-                    document=f,
-                    filename=os.path.basename(filepath),
-                    caption=f"📊 Buy Orders | ${volume:.2f} | "
-                            f"{len(items)} предметов"
-                            f"{f' | мін.прибыль {min_profit:.0f}%' if min_profit > 0 else ''}"
-                            f"\n🔑 {alive2}/{len(keys_info2)} ключей",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔑 Ключи MCSGO", callback_data="bo:keys")]
-                    ]))
-        except Exception as e:
-            log.error("Buyorders re-generation error: %s", e)
-            await msg.edit_text(f"❌ Ошибка генерации: {e}")
-
-        ctx.user_data.clear()
-        return ConversationHandler.END
+            f"Выбери режим генерации:",
+            parse_mode="HTML",
+            reply_markup=kb)
+        return ST_MODE
     else:
         await update.message.reply_text(
             f"✅ Новый ключ применён: <code>{_mask_key(key)}</code>\n"
             f"🔑 Активных: {alive}\n\n"
-            f"Начни генерацию заново: 📊 Создать БД STM-MCS",
+            f"Начни генерацию: 📊 Создать БД STM-MCS",
             parse_mode="HTML")
         ctx.user_data.clear()
         return ConversationHandler.END
@@ -1802,6 +1747,10 @@ def get_conversation_handler() -> ConversationHandler:
             ],
             ST_NEW_KEY: [
                 MessageHandler(_NOT_MENU, got_new_key),
+            ],
+            ST_MODE: [
+                CallbackQueryHandler(mode_selected, pattern=r"^bo:mode:(fast|full)$"),
+                CallbackQueryHandler(change_key_cb, pattern=r"^bo:change_key$"),
             ],
         },
         fallbacks=[
