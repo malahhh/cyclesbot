@@ -860,15 +860,7 @@ def _build_items(raw_items: list, excluded: set,
         if not ref_price or ref_price <= 0:
             stats["no_ref_price"] += 1
             continue
-
-        # Проверяем что текущий листинг на MCSGO выше цены БО
-        bulk_listing = _mcsgo_bulk_prices_cache.get(name, {})
-        if isinstance(bulk_listing, dict):
-            current_min = bulk_listing.get("price", 0)
-            if current_min > 0 and current_min < buy_price:
-                stats["no_margin"] += 1
-                continue  # текущий листинг ниже БО — бесполезно
-
+        
         net = ref_price * (1 - MARKET_FEE)
         margin = ((net - buy_price) / buy_price * 100) if buy_price > 0 else 0
         if margin < min_profit or margin > 50:
