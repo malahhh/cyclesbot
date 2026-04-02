@@ -225,15 +225,19 @@ def _on_bad_key(key: str):
     if _mcsgo_alert_fn:
         alive_count = sum(1 for kd in _mcsgo_keys if kd["alive"])
         total = len(_mcsgo_keys)
+        dead_idx = next((i for i, kd in enumerate(_mcsgo_keys) if kd["key"] == key), 0)
+        masked = _mask_key(key)
         if alive_count > 0:
+            next_masked = _mask_key(_mcsgo_keys[_mcsgo_key_idx]["key"])
             _mcsgo_alert_fn(
-                f"⚠️ MarketCSGO ключ #{_mcsgo_keys.index(next(kd for kd in _mcsgo_keys if kd['key'] == key)) + 1} "
-                f"мёртв ({_mask_key(key)}), переключаюсь.\n"
+                f"⚠️ Ключ #{dead_idx + 1} ({masked}) мёртв, "
+                f"переключаюсь на #{_mcsgo_key_idx + 1} ({next_masked})\n"
                 f"🔑 Активных: {alive_count}/{total}")
         else:
             _mcsgo_alert_fn(
-                f"🚨 ВСЕ MarketCSGO ключи мертвы ({total} шт)!\n"
-                f"Сканирование остановлено. Добавь новый: /lis_keys или кнопку 🔑")
+                f"🚨 Ключ #{dead_idx + 1} ({masked}) мёртв — "
+                f"ВСЕ {total} ключей мертвы!\n"
+                f"Сканирование остановлено. Добавь новый через кнопку 🔑")
 
 
 # При запуске — загружаем ключи
