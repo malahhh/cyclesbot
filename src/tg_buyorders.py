@@ -1477,11 +1477,16 @@ async def _keys_menu(update_or_query):
     if not keys:
         text = "🔑 <b>MarketCSGO ключи</b>\n\nНет ключей. Добавь через кнопку ниже."
     else:
-        lines = [f"🔑 <b>MarketCSGO ключи</b> ({sum(1 for k in keys if k['alive'])}/{len(keys)} активных)\n"]
-        for i, k in enumerate(keys):
-            marker = "▶️" if k["current"] else ""
-            status = "✅" if k["alive"] else "💀"
-            lines.append(f"{i+1}. {status} <code>{k['masked']}</code> {marker}")
+        alive = [k for k in keys if k["alive"]]
+        dead = [k for k in keys if not k["alive"]]
+        lines = [f"🔑 <b>MarketCSGO ключи</b> ({len(alive)}/{len(keys)} активных)\n"]
+        for k in alive:
+            if k["current"]:
+                lines.append(f"▶️ #{k['idx']+1} <code>{k['masked']}</code> <b>(используется)</b>")
+            else:
+                lines.append(f"✅ #{k['idx']+1} <code>{k['masked']}</code>")
+        if dead:
+            lines.append(f"\n❌ Мёртвых: {len(dead)}")
         text = "\n".join(lines)
 
     btns = [[InlineKeyboardButton("➕ Добавить ключ", callback_data="bo:keys_add")]]
