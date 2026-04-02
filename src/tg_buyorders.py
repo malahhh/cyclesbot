@@ -255,11 +255,13 @@ def validate_mcsgo_keys() -> dict:
     if not keys_snapshot:
         return {"alive": 0, "removed": 0, "total_before": 0}
 
+    import httpx as _httpx
+
     alive_keys = []
     removed = []
     for kd in keys_snapshot:
         try:
-            r = httpx.get(
+            r = _httpx.get(
                 "https://market.csgo.com/api/v2/get-money",
                 params={"key": kd["key"]},
                 timeout=10)
