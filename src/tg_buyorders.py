@@ -1073,7 +1073,7 @@ async def start_buyorders(update: Update,
             f"${last.get('min_price', '?')}-${last.get('max_price', '?')}, "
             f"мін {last.get('min_profit', '?')}%)",
             callback_data="bo:repeat")])
-    kb.append([InlineKeyboardButton("🔑 Сменить ключ", callback_data="bo:keys_add")])
+    kb.append([InlineKeyboardButton("🔑 Сменить ключ", callback_data="bo:change_key")])
 
     text = (
         f"📊 <b>Создание БД STM-MCS</b>\n\n"
@@ -1464,6 +1464,21 @@ async def cancel_buyorders(update: Update,
     return ConversationHandler.END
 
 
+async def change_key_cb(update: Update,
+                        ctx: ContextTypes.DEFAULT_TYPE):
+    """Callback bo:change_key — переход в ST_NEW_KEY из любого состояния."""
+    q = update.callback_query
+    await q.answer()
+    keys_info = get_mcsgo_keys_info()
+    alive = sum(1 for k in keys_info if k["alive"])
+    await q.edit_message_text(
+        f"🔑 <b>Смена ключа MarketCSGO</b>\n\n"
+        f"Текущих ключей: {alive}/{len(keys_info)}\n\n"
+        f"Отправь новый API ключ (USD):",
+        parse_mode="HTML")
+    return ST_NEW_KEY
+
+
 async def got_new_key(update: Update,
                       ctx: ContextTypes.DEFAULT_TYPE):
     """Получили новый MarketCSGO API ключ — сохраняем и перезапускаем генерацию."""
@@ -1474,13 +1489,14 @@ async def got_new_key(update: Update,
 
     add_mcsgo_key(key)
     info = get_mcsgo_keys_info()
+    alive = sum(1 for k in info if k["alive"])
     await update.message.reply_text(
-        f"✅ Ключ добавлен: <code>{_mask_key(key)}</code>\n"
-        f"🔑 Всего: {len(info)}\n\n⏳ Перезапускаю генерацию...",
+        f"✅ Новый ключ применён: <code>{_mask_key(key)}</code>\n"
+        f"🔑 Активных: {alive} ключ(ей)\n\n"
+        f"⏳ Перезапускаю генерацию...",
         parse_mode="HTML")
 
     # Перезапускаем генерацию с сохранёнными параметрами
-    # Вызываем got_min_profit повторно — он запустит _build_items
     return await got_min_profit(update, ctx)
 
 
@@ -1619,22 +1635,28 @@ def get_conversation_handler() -> ConversationHandler:
         states={
             ST_VOLUME: [
                 CallbackQueryHandler(repeat_last, pattern=r"^bo:repeat$"),
+                CallbackQueryHandler(change_key_cb, pattern=r"^bo:change_key$"),
                 MessageHandler(_NOT_MENU, got_volume),
             ],
             ST_EXCLUDES: [
                 CallbackQueryHandler(toggle_exclude,
                                      pattern=r"^bo:ex:"),
+                CallbackQueryHandler(change_key_cb, pattern=r"^bo:change_key$"),
             ],
             ST_MIN_PRICE: [
+                CallbackQueryHandler(change_key_cb, pattern=r"^bo:change_key$"),
                 MessageHandler(_NOT_MENU, got_min_price),
             ],
             ST_MAX_PRICE: [
+                CallbackQueryHandler(change_key_cb, pattern=r"^bo:change_key$"),
                 MessageHandler(_NOT_MENU, got_max_price),
             ],
             ST_DISCOUNT: [
+                CallbackQueryHandler(change_key_cb, pattern=r"^bo:change_key$"),
                 MessageHandler(_NOT_MENU, got_discount),
             ],
             ST_MIN_PROFIT: [
+                CallbackQueryHandler(change_key_cb, pattern=r"^bo:change_key$"),
                 MessageHandler(_NOT_MENU, got_min_profit),
             ],
             ST_NEW_KEY: [
