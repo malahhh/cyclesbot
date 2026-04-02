@@ -1451,9 +1451,12 @@ async def got_new_key(update: Update,
         await update.message.reply_text("❌ Неверный формат ключа. Попробуй ещё:")
         return ST_NEW_KEY
 
-    set_mcsgo_key(key)
+    add_mcsgo_key(key)
+    info = get_mcsgo_keys_info()
     await update.message.reply_text(
-        f"✅ Ключ обновлён!\n\n⏳ Перезапускаю генерацию...")
+        f"✅ Ключ добавлен: <code>{_mask_key(key)}</code>\n"
+        f"🔑 Всего: {len(info)}\n\n⏳ Перезапускаю генерацию...",
+        parse_mode="HTML")
 
     # Перезапускаем генерацию с сохранёнными параметрами
     # Вызываем got_min_profit повторно — он запустит _build_items
