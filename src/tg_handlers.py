@@ -581,6 +581,9 @@ def setup_handlers(app):
     # ConversationHandler для buy orders (должен быть ДО общего MessageHandler)
     import tg_buyorders
     app.add_handler(tg_buyorders.get_conversation_handler())
+    # Inline кнопки управления ключами MCSGO (вне conversation)
+    for h in tg_buyorders.get_keys_handlers():
+        app.add_handler(h)
     
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(on_callback))

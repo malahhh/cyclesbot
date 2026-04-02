@@ -60,43 +60,184 @@ ANTIBOOST_VELOCITY_THRESHOLD = -5.0  # latest vs med7d (было -7%)
 ANTIBOOST_MIN_SOLD_24H = 9           # минимум ликвидность
 MIN_AGE_DAYS = 180                   # минимум 6 месяцев на рынке
 
-# MarketCSGO API
-_mcsgo_api_key = "x5cTwFFa67vGoCffl8HbxwE8F2WWf6p"
+# MarketCSGO API — мульти-ключи с round-robin ротацией
+import threading as _th
+
+_keys_lock = _th.Lock()
+_mcsgo_keys: list[dict] = []  # [{key: str, alive: bool}]
+_mcsgo_key_idx = 0
+_mcsgo_req_counter = 0
+_ROTATE_EVERY = 2  # переключаться каждые N запросов
+_mcsgo_alert_fn = None  # callback для TG уведомлений
+
+
+def _mask_key(key: str) -> str:
+    """Первые 8 символов + ****."""
+    return key[:8] + "****" if len(key) > 8 else key[:4] + "****"
+
+
+def _load_keys():
+    """Загрузить ключи из mcsgo_keys.txt, fallback на mcsgo_key.txt."""
+    global _mcsgo_keys, _mcsgo_key_idx, _mcsgo_req_counter
+    root = Path(__file__).parent.parent
+    keys = []
+
+    # Приоритет: mcsgo_keys.txt (мульти-ключи)
+    multi_file = root / "mcsgo_keys.txt"
+    if multi_file.exists():
+        for line in multi_file.read_text().strip().splitlines():
+            k = line.strip()
+            if k and len(k) > 10 and not k.startswith("#"):
+                keys.append(k)
+
+    # Fallback: mcsgo_key.txt (один ключ)
+    if not keys:
+        single_file = root / "mcsgo_key.txt"
+        if single_file.exists():
+            k = single_file.read_text().strip()
+            if k and len(k) > 10:
+                keys.append(k)
+
+    with _keys_lock:
+        _mcsgo_keys = [{"key": k, "alive": True} for k in keys]
+        _mcsgo_key_idx = 0
+        _mcsgo_req_counter = 0
+
+    if keys:
+        log.info("🔑 MarketCSGO ключей загружено: %d (%s)",
+                 len(keys), ", ".join(_mask_key(k) for k in keys))
+    else:
+        log.warning("⚠️ MarketCSGO: нет ключей!")
+
+
+def _save_keys():
+    """Сохранить текущие ключи в mcsgo_keys.txt."""
+    root = Path(__file__).parent.parent
+    with _keys_lock:
+        lines = [kd["key"] for kd in _mcsgo_keys]
+    (root / "mcsgo_keys.txt").write_text("\n".join(lines) + "\n")
+
+
+def reload_mcsgo_keys():
+    """Перечитать ключи из файла (после add/remove)."""
+    _load_keys()
+
+
+def get_mcsgo_keys_info() -> list[dict]:
+    """Информация о ключах для TG UI [{masked, alive, current}]."""
+    with _keys_lock:
+        return [
+            {
+                "idx": i,
+                "masked": _mask_key(kd["key"]),
+                "alive": kd["alive"],
+                "current": i == _mcsgo_key_idx,
+            }
+            for i, kd in enumerate(_mcsgo_keys)
+        ]
+
+
+def add_mcsgo_key(key: str) -> bool:
+    """Добавить ключ. Возвращает False если дубликат."""
+    with _keys_lock:
+        if any(kd["key"] == key for kd in _mcsgo_keys):
+            return False
+        _mcsgo_keys.append({"key": key, "alive": True})
+    _save_keys()
+    log.info("🔑 MarketCSGO ключ добавлен: %s", _mask_key(key))
+    return True
+
+
+def remove_mcsgo_key(idx: int) -> bool:
+    """Удалить ключ по индексу (0-based)."""
+    global _mcsgo_key_idx
+    with _keys_lock:
+        if idx < 0 or idx >= len(_mcsgo_keys):
+            return False
+        removed = _mcsgo_keys.pop(idx)
+        if _mcsgo_key_idx >= len(_mcsgo_keys):
+            _mcsgo_key_idx = 0
+    _save_keys()
+    log.info("🗑 MarketCSGO ключ удалён: %s", _mask_key(removed["key"]))
+    return True
+
+
+def set_mcsgo_alert_fn(fn):
+    """Установить callback для TG уведомлений при смерти ключа."""
+    global _mcsgo_alert_fn
+    _mcsgo_alert_fn = fn
+
 
 def get_mcsgo_key() -> str:
-    return _mcsgo_api_key
+    """Получить текущий ключ (round-robin каждые 2 запроса)."""
+    global _mcsgo_key_idx, _mcsgo_req_counter
+    with _keys_lock:
+        if not _mcsgo_keys:
+            return ""
+        alive_keys = [i for i, kd in enumerate(_mcsgo_keys) if kd["alive"]]
+        if not alive_keys:
+            return _mcsgo_keys[0]["key"]  # все мертвы — вернуть первый для ошибки
+
+        _mcsgo_req_counter += 1
+        if _mcsgo_req_counter >= _ROTATE_EVERY:
+            _mcsgo_req_counter = 0
+            # Перейти на следующий живой ключ
+            cur = _mcsgo_key_idx
+            for _ in range(len(_mcsgo_keys)):
+                cur = (cur + 1) % len(_mcsgo_keys)
+                if _mcsgo_keys[cur]["alive"]:
+                    _mcsgo_key_idx = cur
+                    break
+
+        return _mcsgo_keys[_mcsgo_key_idx]["key"]
+
 
 def set_mcsgo_key(key: str):
-    global _mcsgo_api_key
-    _mcsgo_api_key = key
+    """Совместимость: установить единственный ключ."""
+    global _mcsgo_keys, _mcsgo_key_idx
+    with _keys_lock:
+        _mcsgo_keys = [{"key": key, "alive": True}]
+        _mcsgo_key_idx = 0
+    _save_keys()
     log.info("🔑 MarketCSGO API ключ обновлён: %s...", key[:4])
-    # Сохраняем в файл чтобы пережить рестарт
-    try:
-        import pathlib
-        key_file = Path(__file__).parent.parent / "mcsgo_key.txt"
-        key_file.write_text(key)
-    except Exception as e:
-        log.warning("Не удалось сохранить ключ в файл: %s", e)
 
 
-def _load_saved_key():
-    """Загрузить ключ из файла если есть."""
-    try:
-        import pathlib
-        key_file = Path(__file__).parent.parent / "mcsgo_key.txt"
-        if key_file.exists():
-            saved = key_file.read_text().strip()
-            if len(saved) > 10:
-                return saved
-    except Exception:
-        pass
-    return None
+def _on_bad_key(key: str):
+    """Пометить ключ как мёртвый, переключиться на следующий."""
+    global _mcsgo_key_idx
+    with _keys_lock:
+        for i, kd in enumerate(_mcsgo_keys):
+            if kd["key"] == key:
+                kd["alive"] = False
+                log.error("💀 MarketCSGO ключ #%d мёртв: %s", i + 1, _mask_key(key))
+                break
 
-# При запуске — загружаем сохранённый ключ
-_saved = _load_saved_key()
-if _saved:
-    _mcsgo_api_key = _saved
-    log.info("🔑 Загружен сохранённый MCSGO ключ: %s...", _saved[:4])
+        # Переключиться на следующий живой
+        alive = [i for i, kd in enumerate(_mcsgo_keys) if kd["alive"]]
+        if alive:
+            _mcsgo_key_idx = alive[0]
+            log.info("🔄 Переключаюсь на ключ #%d: %s",
+                     _mcsgo_key_idx + 1, _mask_key(_mcsgo_keys[_mcsgo_key_idx]["key"]))
+        else:
+            log.error("❌ ВСЕ MarketCSGO ключи мертвы!")
+
+    # TG уведомление
+    if _mcsgo_alert_fn:
+        alive_count = sum(1 for kd in _mcsgo_keys if kd["alive"])
+        total = len(_mcsgo_keys)
+        if alive_count > 0:
+            _mcsgo_alert_fn(
+                f"⚠️ MarketCSGO ключ #{_mcsgo_keys.index(next(kd for kd in _mcsgo_keys if kd['key'] == key)) + 1} "
+                f"мёртв ({_mask_key(key)}), переключаюсь.\n"
+                f"🔑 Активных: {alive_count}/{total}")
+        else:
+            _mcsgo_alert_fn(
+                f"🚨 ВСЕ MarketCSGO ключи мертвы ({total} шт)!\n"
+                f"Сканирование остановлено. Добавь новый: /lis_keys или кнопку 🔑")
+
+
+# При запуске — загружаем ключи
+_load_keys()
 MCSGO_BATCH_SIZE = 45                # макс предметов за запрос
 MCSGO_RATE_LIMIT = 1.0               # 1 сек сон после каждого батча
 
@@ -280,8 +421,12 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                 log.warning("MarketCSGO batch %d/%d: success=false, error=%s (%.1fs)",
                            bi + 1, len(batches), error, t_after - t_before)
                 if "Bad KEY" in str(error):
-                    log.error("❌ MarketCSGO API KEY заблокирован!")
-                    return {"error": "MarketCSGO API ключ заблокирован (Bad KEY). Нужен новый ключ."}
+                    _on_bad_key(get_mcsgo_key())
+                    alive = [kd for kd in _mcsgo_keys if kd["alive"]]
+                    if not alive:
+                        return {"error": "❌ Все MarketCSGO ключи мертвы!"}
+                    # Retry этот батч с новым ключом
+                    continue
                 time.sleep(MCSGO_RATE_LIMIT)
                 continue
             
@@ -303,29 +448,28 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                 
                 latest_price = all_prices[0]
                 
-                # --- Фильтр: стабильность цены ---
-                # stdev > 30% от медианы → исключить
-                # НО: только если >3 продаж за пределами ±30% от медианы
+                # --- Фильтр: стабильность цены (ослаблен) ---
+                # stdev > 50% от медианы + >5 выбросов → исключить
                 if len(all_prices) >= 10:
                     med_all = statistics.median(all_prices)
                     if med_all > 0:
                         outliers = sum(
                             1 for p in all_prices
-                            if abs(p - med_all) / med_all > 0.30)
-                        if outliers > 3:
+                            if abs(p - med_all) / med_all > 0.50)
+                        if outliers > 5:
                             stdev = statistics.stdev(all_prices)
-                            if stdev / med_all > 0.30:
+                            if stdev / med_all > 0.50:
                                 continue  # нестабильная цена
                 
-                # --- Фильтр: тренд на MCSGO ---
+                # --- Фильтр: тренд на MCSGO (ослаблен) ---
                 # avg последних 10 vs avg первых 10
-                # Если дешевеет >10% → исключить
+                # Если дешевеет >25% → исключить
                 if len(all_prices) >= 20:
                     avg_last10 = statistics.mean(all_prices[:10])
                     avg_first10 = statistics.mean(all_prices[-10:])
                     if avg_first10 > 0:
                         trend = (avg_last10 - avg_first10) / avg_first10 * 100
-                        if trend < -10:
+                        if trend < -25:
                             continue  # предмет дешевеет
                 
                 # Фильтруем по периодам
@@ -346,7 +490,7 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                 med7 = statistics.median(prices_7d) if prices_7d else latest_price
                 med30 = statistics.median(prices_30d) if prices_30d else latest_price
                 
-                # Проверка ликвидности: минимум 5 продаж за 7 дней
+                # Проверка ликвидности: batch sales_7d >= 5 ИЛИ bulk has_sales
                 sales_7d = 0
                 for entry in history:
                     try:
@@ -354,10 +498,11 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                             sales_7d += 1
                     except (ValueError, IndexError):
                         pass
-                if sales_7d < 5:
-                    continue  # неликвид на MCSGO
-                
                 bulk_info = _mcsgo_bulk_prices_cache.get(name, {})
+                bulk_has_sales = (isinstance(bulk_info, dict)
+                                  and bulk_info.get("has_sales"))
+                if sales_7d < 5 and not bulk_has_sales:
+                    continue  # неликвид на MCSGO
                 
                 # Спайк: среднее из 3 последних продаж на MCSGO
                 last3_avg = 0
@@ -417,7 +562,7 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
         key_dead = False
         for bi, batch in enumerate(r_batches):
             url = "https://market.csgo.com/api/v2/get-list-items-info"
-            query_parts = [f"key={key}"]
+            query_parts = [f"key={get_mcsgo_key()}"]
             for name in batch:
                 query_parts.append(f"list_hash_name[]={quote(name)}")
             full_url = url + "?" + "&".join(query_parts)
@@ -438,8 +583,12 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                 data = resp.json()
                 if not data.get("success"):
                     if "Bad KEY" in str(data.get("error", "")):
-                        key_dead = True
-                        break
+                        _on_bad_key(get_mcsgo_key())
+                        alive = [kd for kd in _mcsgo_keys if kd["alive"]]
+                        if not alive:
+                            key_dead = True
+                            break
+                        continue  # retry с новым ключом
                     time.sleep(MCSGO_RATE_LIMIT)
                     continue
                 for name, info in data.get("data", {}).items():
@@ -1121,9 +1270,10 @@ async def got_min_profit(update: Update,
         items = _build_items(raw, excluded, min_price, max_price,
                              volume, discount=discount, min_profit=min_profit)
         if isinstance(items, dict) and "error" in items:
-            if "Bad KEY" in items["error"]:
+            if "Bad KEY" in items["error"] or "мертвы" in items["error"]:
                 await msg.edit_text(
                     f"❌ {items['error']}\n\n"
+                    f"🔑 Добавь новый ключ или проверь существующие\n"
                     f"Отправь новый API ключ MarketCSGO (USD):")
                 return ST_NEW_KEY
             await msg.edit_text(f"❌ {items['error']}")
@@ -1170,13 +1320,21 @@ async def got_min_profit(update: Update,
             parse_mode="HTML")
 
         # Отправляем файл
+        keys_info = get_mcsgo_keys_info()
+        alive_keys = sum(1 for k in keys_info if k["alive"])
+        keys_status = f"🔑 {alive_keys}/{len(keys_info)} ключей"
+
         with open(filepath, "rb") as f:
             await update.message.reply_document(
                 document=f,
                 filename=os.path.basename(filepath),
                 caption=f"📊 Buy Orders | ${volume:.2f} | "
                         f"{len(items)} предметов"
-                        f"{f' | мин.прибыль {min_profit:.0f}%' if min_profit > 0 else ''}")
+                        f"{f' | мін.прибыль {min_profit:.0f}%' if min_profit > 0 else ''}"
+                        f"\n{keys_status}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔑 Ключи MCSGO", callback_data="bo:keys")]
+                ]))
 
     except Exception as e:
         log.error("Buyorders generation error: %s", e)
@@ -1241,9 +1399,10 @@ async def repeat_last(update: Update,
         items = _build_items(raw, excluded, min_price, max_price,
                              volume, discount=discount, min_profit=min_profit)
         if isinstance(items, dict) and "error" in items:
-            if "Bad KEY" in items["error"]:
+            if "Bad KEY" in items["error"] or "мертвы" in items["error"]:
                 await msg.edit_text(
                     f"❌ {items['error']}\n\n"
+                    f"🔑 Добавь новый ключ или проверь существующие\n"
                     f"Отправь новый API ключ MarketCSGO (USD):")
                 return ST_NEW_KEY
             await msg.edit_text(f"❌ {items['error']}")
@@ -1299,6 +1458,123 @@ async def got_new_key(update: Update,
     # Перезапускаем генерацию с сохранёнными параметрами
     # Вызываем got_min_profit повторно — он запустит _build_items
     return await got_min_profit(update, ctx)
+
+
+# ============================================================
+# Управление ключами MCSGO (inline callbacks)
+# ============================================================
+
+async def _keys_menu(update_or_query):
+    """Показать меню ключей."""
+    keys = get_mcsgo_keys_info()
+    if not keys:
+        text = "🔑 <b>MarketCSGO ключи</b>\n\nНет ключей. Добавь через кнопку ниже."
+    else:
+        lines = [f"🔑 <b>MarketCSGO ключи</b> ({sum(1 for k in keys if k['alive'])}/{len(keys)} активных)\n"]
+        for i, k in enumerate(keys):
+            marker = "▶️" if k["current"] else ""
+            status = "✅" if k["alive"] else "💀"
+            lines.append(f"{i+1}. {status} <code>{k['masked']}</code> {marker}")
+        text = "\n".join(lines)
+
+    btns = [[InlineKeyboardButton("➕ Добавить ключ", callback_data="bo:keys_add")]]
+    if keys:
+        btns.append([InlineKeyboardButton(f"🗑 Удалить ключ", callback_data="bo:keys_rm")])
+    btns.append([InlineKeyboardButton("🔙 Закрыть", callback_data="bo:keys_close")])
+    kb = InlineKeyboardMarkup(btns)
+
+    if hasattr(update_or_query, "edit_message_text"):
+        await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await update_or_query.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def cb_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Callback: bo:keys — показать меню."""
+    q = update.callback_query
+    await q.answer()
+    await _keys_menu(q)
+
+
+async def cb_keys_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Callback: bo:keys_add — запросить ключ."""
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "🔑 Отправь новый API ключ MarketCSGO (USD).\n"
+        "Ключ будет добавлен к существующим.\n\n"
+        "/cancel для отмены")
+    ctx.user_data["_awaiting_mcsgo_key"] = True
+
+
+async def cb_keys_rm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Callback: bo:keys_rm — показать кнопки удаления."""
+    q = update.callback_query
+    await q.answer()
+    keys = get_mcsgo_keys_info()
+    if not keys:
+        await q.edit_message_text("Нет ключей для удаления.")
+        return
+    btns = []
+    for i, k in enumerate(keys):
+        status = "✅" if k["alive"] else "💀"
+        btns.append([InlineKeyboardButton(
+            f"🗑 #{i+1} {status} {k['masked']}",
+            callback_data=f"bo:keys_rm:{i}")])
+    btns.append([InlineKeyboardButton("🔙 Назад", callback_data="bo:keys")])
+    await q.edit_message_text(
+        "🗑 Выбери ключ для удаления:", reply_markup=InlineKeyboardMarkup(btns))
+
+
+async def cb_keys_rm_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Callback: bo:keys_rm:N — удалить ключ."""
+    q = update.callback_query
+    await q.answer()
+    idx = int(q.data.split(":")[-1])
+    info = get_mcsgo_keys_info()
+    if idx < 0 or idx >= len(info):
+        await q.edit_message_text("❌ Неверный номер")
+        return
+    remove_mcsgo_key(idx)
+    await _keys_menu(q)
+
+
+async def cb_keys_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Callback: bo:keys_close — закрыть."""
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text("🔑 Меню ключей закрыто.")
+
+
+async def on_mcsgo_key_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстового сообщения с ключом (после bo:keys_add)."""
+    if not ctx.user_data.get("_awaiting_mcsgo_key"):
+        return  # не ждём ключ
+    ctx.user_data.pop("_awaiting_mcsgo_key", None)
+    key = update.message.text.strip()
+    if len(key) < 10:
+        await update.message.reply_text("❌ Ключ слишком короткий")
+        return
+    ok = add_mcsgo_key(key)
+    if ok:
+        info = get_mcsgo_keys_info()
+        await update.message.reply_text(
+            f"✅ Ключ добавлен: <code>{_mask_key(key)}</code>\n"
+            f"🔑 Всего ключей: {len(info)}",
+            parse_mode="HTML")
+    else:
+        await update.message.reply_text("❌ Ключ уже существует")
+
+
+def get_keys_handlers() -> list:
+    """Handlers для inline-кнопок управления ключами MCSGO."""
+    return [
+        CallbackQueryHandler(cb_keys, pattern=r"^bo:keys$"),
+        CallbackQueryHandler(cb_keys_add, pattern=r"^bo:keys_add$"),
+        CallbackQueryHandler(cb_keys_rm, pattern=r"^bo:keys_rm$"),
+        CallbackQueryHandler(cb_keys_rm_confirm, pattern=r"^bo:keys_rm:\d+$"),
+        CallbackQueryHandler(cb_keys_close, pattern=r"^bo:keys_close$"),
+    ]
 
 
 def get_conversation_handler() -> ConversationHandler:
