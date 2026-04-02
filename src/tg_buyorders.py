@@ -1490,14 +1490,81 @@ async def got_new_key(update: Update,
     add_mcsgo_key(key)
     info = get_mcsgo_keys_info()
     alive = sum(1 for k in info if k["alive"])
-    await update.message.reply_text(
-        f"✅ Новый ключ применён: <code>{_mask_key(key)}</code>\n"
-        f"🔑 Активных: {alive} ключ(ей)\n\n"
-        f"⏳ Перезапускаю генерацию...",
-        parse_mode="HTML")
 
-    # Перезапускаем генерацию с сохранёнными параметрами
-    return await got_min_profit(update, ctx)
+    # Проверяем есть ли сохранённые параметры для перезапуска
+    has_params = all(k in ctx.user_data for k in ("bo_volume", "bo_min_price", "bo_max_price"))
+    if has_params:
+        volume = ctx.user_data["bo_volume"]
+        min_price = ctx.user_data["bo_min_price"]
+        max_price = ctx.user_data["bo_max_price"]
+        discount = ctx.user_data.get("bo_discount", 0)
+        min_profit = ctx.user_data.get("bo_min_profit", 8)
+        excluded = ctx.user_data.get("bo_excludes", set())
+
+        msg = await update.message.reply_text(
+            f"✅ Новый ключ применён: <code>{_mask_key(key)}</code>\n"
+            f"🔑 Активных: {alive}\n\n"
+            f"⏳ Генерирую БО (${volume}, ${min_price}-${max_price}, "
+            f"мін {min_profit}%)...",
+            parse_mode="HTML")
+
+        # Запускаем генерацию напрямую
+        try:
+            raw = _get_steamwebapi_data()
+            if not raw:
+                await msg.edit_text("❌ Не удалось загрузить данные SteamWebAPI")
+                ctx.user_data.clear()
+                return ConversationHandler.END
+
+            items = _build_items(raw, excluded, min_price, max_price,
+                                 volume, discount=discount, min_profit=min_profit)
+            if isinstance(items, dict) and "error" in items:
+                await msg.edit_text(f"❌ {items['error']}")
+                ctx.user_data.clear()
+                return ConversationHandler.END
+            if not items:
+                await msg.edit_text("❌ Нет предметов по заданным параметрам")
+                ctx.user_data.clear()
+                return ConversationHandler.END
+
+            params = {
+                "volume": volume, "min_price": min_price,
+                "max_price": max_price, "discount": discount,
+                "min_profit": min_profit, "excluded": list(excluded),
+            }
+            filepath = _generate_excel(items, params)
+            await msg.edit_text(
+                f"✅ Готово! {len(items)} предметов\n"
+                f"📎 Отправляю файл...",
+                parse_mode="HTML")
+
+            keys_info2 = get_mcsgo_keys_info()
+            alive2 = sum(1 for k in keys_info2 if k["alive"])
+            with open(filepath, "rb") as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=os.path.basename(filepath),
+                    caption=f"📊 Buy Orders | ${volume:.2f} | "
+                            f"{len(items)} предметов"
+                            f"{f' | мін.прибыль {min_profit:.0f}%' if min_profit > 0 else ''}"
+                            f"\n🔑 {alive2}/{len(keys_info2)} ключей",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔑 Ключи MCSGO", callback_data="bo:keys")]
+                    ]))
+        except Exception as e:
+            log.error("Buyorders re-generation error: %s", e)
+            await msg.edit_text(f"❌ Ошибка генерации: {e}")
+
+        ctx.user_data.clear()
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text(
+            f"✅ Новый ключ применён: <code>{_mask_key(key)}</code>\n"
+            f"🔑 Активных: {alive}\n\n"
+            f"Начни генерацию заново: 📊 Создать БД STM-MCS",
+            parse_mode="HTML")
+        ctx.user_data.clear()
+        return ConversationHandler.END
 
 
 # ============================================================
