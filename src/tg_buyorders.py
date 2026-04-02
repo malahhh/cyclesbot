@@ -139,7 +139,7 @@ def get_mcsgo_keys_info() -> list[dict]:
 
 def add_mcsgo_key(key: str) -> bool:
     """Добавить ключ. Возвращает False если дубликат."""
-    global _mcsgo_key_idx
+    global _mcsgo_key_idx, _mcsgo_req_counter
     with _keys_lock:
         if any(kd["key"] == key for kd in _mcsgo_keys):
             return False
@@ -147,6 +147,7 @@ def add_mcsgo_key(key: str) -> bool:
         # Удаляем мёртвые ключи (остаётся только живые + новый)
         _mcsgo_keys[:] = [kd for kd in _mcsgo_keys if kd["alive"] or kd["key"] == key]
         _mcsgo_key_idx = len(_mcsgo_keys) - 1  # переключаемся сразу на новый
+        _mcsgo_req_counter = 0  # сбрасываем счётчик, чтобы начать с нового ключа
     _save_keys()
     log.info("🔑 MarketCSGO ключ добавлен: %s", _mask_key(key))
     return True
