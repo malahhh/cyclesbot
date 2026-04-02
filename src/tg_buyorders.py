@@ -245,6 +245,62 @@ def _on_bad_key(key: str):
                 f"Сканирование остановлено. Добавь новый через кнопку 🔑")
 
 
+def validate_mcsgo_keys() -> dict:
+    """Проверить все ключи через get-money. Удалить мёртвые из списка и файла.
+    Возвращает {alive: int, removed: int, total_before: int}."""
+    global _mcsgo_key_idx, _mcsgo_req_counter
+    with _keys_lock:
+        keys_snapshot = list(_mcsgo_keys)
+
+    if not keys_snapshot:
+        return {"alive": 0, "removed": 0, "total_before": 0}
+
+    alive_keys = []
+    removed = []
+    for kd in keys_snapshot:
+        try:
+            r = httpx.get(
+                "https://market.csgo.com/api/v2/get-money",
+                params={"key": kd["key"]},
+                timeout=10)
+            data = r.json()
+            if data.get("success"):
+                kd["alive"] = True
+                alive_keys.append(kd)
+                log.info("🔑 Ключ %s — OK (баланс: %s)",
+                         _mask_key(kd["key"]), data.get("money", "?"))
+            else:
+                removed.append(kd)
+                log.warning("💀 Ключ %s — мёртв: %s",
+                            _mask_key(kd["key"]), data.get("error", "?"))
+        except Exception as e:
+            # Сетевая ошибка — оставляем ключ (не удаляем при timeout)
+            kd["alive"] = True
+            alive_keys.append(kd)
+            log.warning("⚠️ Ключ %s — ошибка проверки: %s (оставляю)",
+                        _mask_key(kd["key"]), e)
+        time.sleep(0.5)  # rate limit между проверками
+
+    with _keys_lock:
+        _mcsgo_keys[:] = alive_keys
+        if _mcsgo_key_idx >= len(_mcsgo_keys):
+            _mcsgo_key_idx = 0
+        _mcsgo_req_counter = 0
+
+    if alive_keys:
+        _save_keys()
+    else:
+        # Все мертвы — очищаем файл
+        root = Path(__file__).parent.parent
+        (root / "mcsgo_keys.txt").write_text("")
+
+    result = {"alive": len(alive_keys), "removed": len(removed),
+              "total_before": len(keys_snapshot)}
+    log.info("🔑 Валидация ключей: %d живых, %d удалено (из %d)",
+             result["alive"], result["removed"], result["total_before"])
+    return result
+
+
 # При запуске — загружаем ключи
 _load_keys()
 MCSGO_BATCH_SIZE = 45                # макс предметов за запрос
@@ -1055,15 +1111,31 @@ async def start_buyorders(update: Update,
         "graffiti", "patches", "agents", "pins"
     }
     
-    # Статус текущего ключа
+    # Проверяем ключи через get-money
+    checking_msg = await update.message.reply_text("🔑 Проверяю ключи MarketCSGO...")
+    vresult = validate_mcsgo_keys()
+
     keys_info = get_mcsgo_keys_info()
     current = next((k for k in keys_info if k["current"]), None)
+
+    # Если нет живых ключей — сразу просить новый
+    if not keys_info or vresult["alive"] == 0:
+        removed_text = ""
+        if vresult["removed"] > 0:
+            removed_text = f"\n🗑 Удалено мёртвых: {vresult['removed']}"
+        await checking_msg.edit_text(
+            f"🔑 <b>Нет активных ключей MarketCSGO</b> ❌{removed_text}\n\n"
+            f"Отправь новый API ключ (USD):",
+            parse_mode="HTML")
+        return ST_NEW_KEY
+
+    # Есть живые ключи
     if current:
-        key_status = f"🔑 Ключ MCSGO: <code>{current['masked']}</code> {'✅' if current['alive'] else '💀'}"
-    elif keys_info:
-        key_status = f"🔑 Ключей: {sum(1 for k in keys_info if k['alive'])}/{len(keys_info)}"
+        key_status = f"🔑 Ключ MCSGO: <code>{current['masked']}</code> ✅ ({vresult['alive']} активный)"
     else:
-        key_status = "🔑 Ключ MCSGO: ❌ не задан"
+        key_status = f"🔑 Активных ключей: {vresult['alive']}"
+    if vresult["removed"] > 0:
+        key_status += f"\n🗑 Удалено мёртвых: {vresult['removed']}"
 
     last = _load_last_settings()
     kb = []
@@ -1084,7 +1156,7 @@ async def start_buyorders(update: Update,
     if last:
         text += "\n\nИли повтори последние настройки:"
 
-    await update.message.reply_text(
+    await checking_msg.edit_text(
         text, parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(kb) if kb else None)
     return ST_VOLUME
