@@ -1054,26 +1054,38 @@ async def start_buyorders(update: Update,
         "graffiti", "patches", "agents", "pins"
     }
     
+    # Статус текущего ключа
+    keys_info = get_mcsgo_keys_info()
+    current = next((k for k in keys_info if k["current"]), None)
+    if current:
+        key_status = f"🔑 Ключ MCSGO: <code>{current['masked']}</code> {'✅' if current['alive'] else '💀'}"
+    elif keys_info:
+        key_status = f"🔑 Ключей: {sum(1 for k in keys_info if k['alive'])}/{len(keys_info)}"
+    else:
+        key_status = "🔑 Ключ MCSGO: ❌ не задан"
+
     last = _load_last_settings()
+    kb = []
     if last:
-        kb = [[InlineKeyboardButton(
+        kb.append([InlineKeyboardButton(
             f"🔄 Повторить (${last.get('volume', '?')}, "
             f"${last.get('min_price', '?')}-${last.get('max_price', '?')}, "
-            f"мин {last.get('min_profit', '?')}%)",
-            callback_data="bo:repeat")]]
-        await update.message.reply_text(
-            "📊 <b>Создание БД STM-MCS</b>\n\n"
-            "Введи общий объём ордеров ($):\n"
-            "<i>Например: 100</i>\n\n"
-            "Или повтори последние настройки:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(kb))
-    else:
-        await update.message.reply_text(
-            "📊 <b>Создание БД STM-MCS</b>\n\n"
-            "Введи общий объём ордеров ($):\n"
-            "<i>Например: 100</i>",
-            parse_mode="HTML")
+            f"мін {last.get('min_profit', '?')}%)",
+            callback_data="bo:repeat")])
+    kb.append([InlineKeyboardButton("🔑 Сменить ключ", callback_data="bo:keys_add")])
+
+    text = (
+        f"📊 <b>Создание БД STM-MCS</b>\n\n"
+        f"{key_status}\n\n"
+        f"Введи общий объём ордеров ($):\n"
+        f"<i>Например: 100</i>"
+    )
+    if last:
+        text += "\n\nИли повтори последние настройки:"
+
+    await update.message.reply_text(
+        text, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(kb) if kb else None)
     return ST_VOLUME
 
 
