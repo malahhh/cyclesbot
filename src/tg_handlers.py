@@ -555,8 +555,10 @@ async def handle_text(update: Update,
         profit = withdrawn - invested
         roi = (profit / invested * 100) if invested > 0 else 0
         emoji = "📈" if profit >= 0 else "📉"
+        from datetime import datetime
         db.update_circle_account(
             acc_id, status="done",
+            finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             check_note=f"Вывод: ${withdrawn:.2f}, "
                        f"P/L: ${profit:+.2f} ({roi:+.1f}%)")
         await update.message.reply_text(

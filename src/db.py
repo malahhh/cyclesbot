@@ -44,7 +44,8 @@ def _init_tables():
             scheme TEXT DEFAULT '',
             status TEXT DEFAULT 'buy',
             check_note TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMP DEFAULT NULL
         );
 
         -- Кэш инвентарей (общий, ключ = steam_id + app_id)

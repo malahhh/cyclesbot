@@ -46,7 +46,7 @@ CATEGORIES = [
 ]
 
 APP_ID = 730
-MARKET_FEE = 0.0  # без комиссии
+MARKET_FEE = 0.0  # комиссия не вычитается
 
 SNIPER_DIR = os.path.expanduser(
     "~/.openclaw/agents/architect/projects/lis-sniper")
@@ -149,6 +149,11 @@ def add_mcsgo_key(key: str) -> bool:
         _mcsgo_key_idx = len(_mcsgo_keys) - 1  # переключаемся сразу на новый
         _mcsgo_req_counter = 0  # сбрасываем счётчик, чтобы начать с нового ключа
     _save_keys()
+    # Очищаем legacy mcsgo_key.txt чтобы при рестарте не подхватывал старый мёртвый ключ
+    root = Path(__file__).parent.parent
+    legacy = root / "mcsgo_key.txt"
+    if legacy.exists():
+        legacy.write_text("")
     log.info("🔑 MarketCSGO ключ добавлен: %s", _mask_key(key))
     return True
 
@@ -207,6 +212,35 @@ def set_mcsgo_key(key: str):
     log.info("🔑 MarketCSGO API ключ обновлён: %s...", key[:4])
 
 
+def _verify_key_dead(key: str) -> bool:
+    """Перепроверить ключ через get-money с паузой.
+    Возвращает True если ключ реально мёртв, False если просто rate limit."""
+    import httpx as _httpx
+    log.warning("🔍 Перепроверяю ключ %s через %.0fs паузу (может быть rate limit)...",
+                _mask_key(key), MCSGO_BAD_KEY_PAUSE)
+    time.sleep(MCSGO_BAD_KEY_PAUSE)
+    for attempt in range(MCSGO_BAD_KEY_RETRIES):
+        try:
+            r = _httpx.get(
+                "https://market.csgo.com/api/v2/get-money",
+                params={"key": key},
+                timeout=15)
+            data = r.json()
+            if data.get("success"):
+                log.info("✅ Ключ %s жив (был rate limit, не Bad KEY)", _mask_key(key))
+                return False  # ключ живой
+            err = data.get("error", "")
+            log.warning("🔍 Попытка %d: ключ %s — %s", attempt + 1, _mask_key(key), err)
+            if attempt < MCSGO_BAD_KEY_RETRIES - 1:
+                time.sleep(3)
+        except Exception as e:
+            log.warning("🔍 Попытка %d: ошибка проверки ключа %s: %s", attempt + 1, _mask_key(key), e)
+            if attempt < MCSGO_BAD_KEY_RETRIES - 1:
+                time.sleep(3)
+    log.error("💀 Ключ %s подтверждён мёртвым после %d проверок", _mask_key(key), MCSGO_BAD_KEY_RETRIES)
+    return True  # реально мёртв
+
+
 def _on_bad_key(key: str):
     """Пометить ключ как мёртвый, переключиться на следующий."""
     global _mcsgo_key_idx
@@ -247,7 +281,7 @@ def _on_bad_key(key: str):
 
 def validate_mcsgo_keys() -> dict:
     """Проверить все ключи через get-money. Удалить мёртвые из списка и файла.
-    Возвращает {alive: int, removed: int, total_before: int}."""
+    Возвращает {alive: int, removed: int, total_before: int, removed_keys: list}."""
     global _mcsgo_key_idx, _mcsgo_req_counter
     with _keys_lock:
         keys_snapshot = list(_mcsgo_keys)
@@ -292,12 +326,16 @@ def validate_mcsgo_keys() -> dict:
     if alive_keys:
         _save_keys()
     else:
-        # Все мертвы — очищаем файл
+        # Все мертвы — очищаем оба файла (в т.ч. legacy mcsgo_key.txt)
         root = Path(__file__).parent.parent
         (root / "mcsgo_keys.txt").write_text("")
+        legacy = root / "mcsgo_key.txt"
+        if legacy.exists():
+            legacy.write_text("")
 
     result = {"alive": len(alive_keys), "removed": len(removed),
-              "total_before": len(keys_snapshot)}
+              "total_before": len(keys_snapshot),
+              "removed_keys": [kd["key"] for kd in removed]}
     log.info("🔑 Валидация ключей: %d живых, %d удалено (из %d)",
              result["alive"], result["removed"], result["total_before"])
     return result
@@ -306,7 +344,16 @@ def validate_mcsgo_keys() -> dict:
 # При запуске — загружаем ключи
 _load_keys()
 MCSGO_BATCH_SIZE = 45                # макс предметов за запрос
-MCSGO_RATE_LIMIT = 1.0               # 1 сек сон после каждого батча
+MCSGO_RATE_LIMIT = 3.0               # 3 сек между батчами (~0.33 req/sec, лимит 4 req/sec)
+MCSGO_BAD_KEY_PAUSE = 15.0          # пауза перед проверкой ключа при Bad KEY
+MCSGO_BAD_KEY_RETRIES = 2           # сколько раз перепроверить ключ через get-money перед убийством
+MCSGO_ACCOUNT_COOLDOWN = 15.0       # кулдаун аккаунта после бана get-list-items-info (сек)
+
+_mcsgo_list_ban_until: float = 0    # timestamp до которого get-list-items-info забанен
+
+# Кеш ref-цен из get-list-items-info: {name: (price, timestamp)}
+_mcsgo_ref_cache: dict = {}
+_MCSGO_REF_CACHE_TTL = 3600  # 1 час
 
 
 def _excludes_kb(excluded: set) -> InlineKeyboardMarkup:
@@ -431,19 +478,48 @@ def _get_marketcsgo_names() -> set:
 
 
 def _get_mcsgo_ref_prices(names: list) -> dict:
-    """Получить негативные ref-цены через MarketCSGO API (batch по 50).
+    """Получить ref-цены через MarketCSGO API (batch по 50).
     
     Для каждого предмета:
-      ref_price = min(median_7d, median_30d, latest)
+      ref_price = min(median_7d, last3_avg)
     
     Returns: {name: ref_price}
     """
+    global _mcsgo_list_ban_until, _mcsgo_ref_cache
     import httpx
     import statistics
-    
+
+    # Проверяем кулдаун аккаунта
     now = time.time()
+    if _mcsgo_list_ban_until > now:
+        wait_left = int(_mcsgo_list_ban_until - now)
+        log.warning("⏳ get-list-items-info на кулдауне ещё %ds — возвращаю из кеша", wait_left)
+        # Возвращаем что есть в кеше
+        cached = {n: _mcsgo_ref_cache[n][0] for n in names
+                  if n in _mcsgo_ref_cache and (now - _mcsgo_ref_cache[n][1]) < _MCSGO_REF_CACHE_TTL}
+        return cached
+
+    # Берём из кеша уже известные цены (TTL 1ч)
     result = {}
+    names_to_fetch = []
+    cached_count = 0
+    for name in names:
+        if name in _mcsgo_ref_cache:
+            price, ts = _mcsgo_ref_cache[name]
+            if now - ts < _MCSGO_REF_CACHE_TTL:
+                result[name] = price
+                cached_count += 1
+                continue
+        names_to_fetch.append(name)
+
+    if cached_count > 0:
+        log.info("📦 Из кеша ref-цен: %d предметов, запрашиваем: %d", cached_count, len(names_to_fetch))
+
+    if not names_to_fetch:
+        return result
+
     checked = set()  # предметы которые API вернул (даже если отсеяны фильтром)
+    names = names_to_fetch  # работаем только с теми что не в кеше
     batches = [names[i:i + MCSGO_BATCH_SIZE]
                for i in range(0, len(names), MCSGO_BATCH_SIZE)]
     
@@ -473,6 +549,19 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                     t_before = time.time()
                     r = httpx.get(full_url, timeout=30)
                     t_after = time.time()
+                    # Детальный лог HTTP
+                    http_status = r.status_code
+                    retry_after = r.headers.get("Retry-After", "")
+                    ratelimit_remaining = r.headers.get("X-RateLimit-Remaining", "")
+                    ratelimit_reset = r.headers.get("X-RateLimit-Reset", "")
+                    log.debug("HTTP %d batch %d/%d (%.2fs) | Retry-After=%s RLimit-Remaining=%s RLimit-Reset=%s",
+                              http_status, bi + 1, len(batches), t_after - t_before,
+                              retry_after or "-", ratelimit_remaining or "-", ratelimit_reset or "-")
+                    if http_status == 429:
+                        wait = float(retry_after) if retry_after else MCSGO_RATE_LIMIT * 5
+                        log.warning("⛔ HTTP 429 Too Many Requests — пауза %.0fs", wait)
+                        time.sleep(wait)
+                        continue
                     data = r.json()
                     break
                 except Exception:
@@ -485,24 +574,28 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
             
             if not data.get("success"):
                 error = data.get("error", "")
-                log.warning("MarketCSGO batch %d/%d: success=false, error=%s (%.1fs)",
-                           bi + 1, len(batches), error, t_after - t_before)
+                log.warning("MarketCSGO batch %d/%d: success=false, error=%s (%.1fs) HTTP=%d",
+                           bi + 1, len(batches), error, t_after - t_before, http_status)
                 if "Bad KEY" in str(error):
-                    _on_bad_key(get_mcsgo_key())
-                    alive = [kd for kd in _mcsgo_keys if kd["alive"]]
-                    if not alive:
-                        return {"error": "❌ Все MarketCSGO ключи мертвы!"}
-                    # Retry этот батч с новым ключом
+                    current_key = get_mcsgo_key()
+                    # Ставим кулдаун и возвращаем что успели — ключ НЕ убиваем
+                    # MCSGO банит сессию после ~19 батчей, но ключ остаётся живым
+                    _mcsgo_list_ban_until = time.time() + MCSGO_ACCOUNT_COOLDOWN
+                    log.warning("⛔ MCSGO лимит сессии на батче %d/%d. "
+                                "Кулдаун %.0fs, возвращаю %d цен. Ключ сохранён.",
+                                bi + 1, len(batches), MCSGO_ACCOUNT_COOLDOWN, len(result))
+                    return result  # возвращаем что успели — ключ живой
                     continue
                 time.sleep(MCSGO_RATE_LIMIT)
                 continue
             
             for name, info in data.get("data", {}).items():
-                checked.add(name)
                 history = info.get("history", [])
                 if not history:
+                    # Не добавляем в checked — чтобы retry мог попробовать снова
                     continue
-                
+                checked.add(name)  # добавляем только если есть история
+
                 all_prices = []
                 for entry in history:
                     try:
@@ -576,52 +669,49 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                 if len(all_prices) >= 3:
                     last3_avg = statistics.mean(all_prices[:3])
                 
-                # ref_price = min(med7d, bulk_avg, min_listing, last3_avg)
-                # пессимистичный сценарий — берём наименьшее
+                # ref_price — только реальные продажи с MCSGO (без bulk)
+                # min(med7d, last3_avg) — пессимистичная оценка на основе истории
                 candidates = []
                 if med7 > 0:
                     candidates.append(med7)
                 if last3_avg > 0:
                     candidates.append(last3_avg)
-                # med30 убрана — слишком пессимистично
-                if isinstance(bulk_info, dict):
-                    bulk_price = bulk_info.get("price", 0)
-                    bulk_avg = bulk_info.get("avg", 0)
-                    if bulk_avg > 0:
-                        candidates.append(bulk_avg)
-                    if bulk_price > 0 and bulk_info.get("has_sales"):
-                        candidates.append(bulk_price)
-                elif bulk_info:
-                    candidates.append(float(bulk_info))
-                
+
                 ref_price = min(candidates) if candidates else 0
                 if ref_price > 0:
                     result[name] = round(ref_price, 2)
-                    
+                    _mcsgo_ref_cache[name] = (round(ref_price, 2), time.time())  # кешируем
+
         except Exception as e:
             log.error("MarketCSGO batch %d/%d error: %s", bi + 1, len(batches), e)
         
         # Rate limit
         if bi < len(batches) - 1:
             time.sleep(MCSGO_RATE_LIMIT)
-        
+            # Дополнительный сон каждые 3 запроса
+            if (bi + 1) % 3 == 0:
+                log.debug("💤 Доп. пауза 2с после батча %d", bi + 1)
+                time.sleep(2.0)
+
         # Прогресс каждые 10 батчей
         if (bi + 1) % 10 == 0:
             log.info("MarketCSGO API: %d/%d батчей (%d цен получено)",
                     bi + 1, len(batches), len(result))
     
-    # Retry цикл — до 99% покрытия или пока улучшается
+    # Retry цикл — до 95% покрытия по ценам (result) или пока улучшается
     max_retries = 5
     for retry_num in range(1, max_retries + 1):
         missing = [n for n in names if n not in result and n not in checked]
-        total_processed = len(result) + len(checked)
-        coverage = total_processed / len(names) * 100 if names else 100
-        if coverage >= 99 or not missing:
+        price_coverage = len(result) / len(names) * 100 if names else 100
+        if price_coverage >= 95 or not missing:
             break
-        
-        log.info("MarketCSGO retry %d: %d предметов (покрытие %.0f%%), повтор...",
-                 retry_num, len(missing), coverage)
-        time.sleep(2)
+
+        log.info("MarketCSGO retry %d: %d без цены (покрытие цен %.0f%%), повтор...",
+                 retry_num, len(missing), price_coverage)
+        # Экспоненциальный backoff: 3, 5, 8, 12, 17 сек
+        retry_pause = 3 + retry_num * (retry_num + 1) / 2
+        log.debug("💤 Пауза перед retry %d: %.0fs", retry_num, retry_pause)
+        time.sleep(retry_pause)
         
         prev_count = len(result)
         r_batches = [missing[i:i + MCSGO_BATCH_SIZE]
@@ -650,19 +740,23 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                 data = resp.json()
                 if not data.get("success"):
                     if "Bad KEY" in str(data.get("error", "")):
-                        _on_bad_key(get_mcsgo_key())
-                        alive = [kd for kd in _mcsgo_keys if kd["alive"]]
-                        if not alive:
-                            key_dead = True
-                            break
+                        current_key = get_mcsgo_key()
+                        if _verify_key_dead(current_key):
+                            _on_bad_key(current_key)
+                            alive = [kd for kd in _mcsgo_keys if kd["alive"]]
+                            if not alive:
+                                key_dead = True
+                                break
+                        else:
+                            time.sleep(MCSGO_RATE_LIMIT * 2)
                         continue  # retry с новым ключом
                     time.sleep(MCSGO_RATE_LIMIT)
                     continue
                 for name, info in data.get("data", {}).items():
-                    checked.add(name)
                     history = info.get("history", [])
                     if not history:
-                        continue
+                        continue  # не в checked — retry попробует снова
+                    checked.add(name)
                     all_prices = [float(e[1]) for e in history if len(e) >= 2]
                     if not all_prices:
                         continue
@@ -672,16 +766,9 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                                  if len(e) >= 2 and (now_ts - int(e[0])) <= 7*86400]
                     med7 = statistics.median(prices_7d) if prices_7d else all_prices[0]
                     last3_avg = statistics.mean(all_prices[:3]) if len(all_prices) >= 3 else 0
-                    bulk_info = _mcsgo_bulk_prices_cache.get(name, {})
                     cands = []
                     if med7 > 0: cands.append(med7)
                     if last3_avg > 0: cands.append(last3_avg)
-                    if isinstance(bulk_info, dict):
-                        ba = bulk_info.get("avg", 0)
-                        bp = bulk_info.get("price", 0)
-                        if ba > 0: cands.append(ba)
-                        if bp > 0 and bulk_info.get("has_sales"):
-                            cands.append(bp)
                     ref = min(cands) if cands else 0
                     if ref > 0:
                         result[name] = round(ref, 2)
@@ -689,6 +776,9 @@ def _get_mcsgo_ref_prices(names: list) -> dict:
                 log.error("MarketCSGO retry %d batch error: %s", retry_num, e)
             if bi < len(r_batches) - 1:
                 time.sleep(MCSGO_RATE_LIMIT)
+                if (bi + 1) % 3 == 0:
+                    log.debug("💤 Доп. пауза 2с (retry) после батча %d", bi + 1)
+                    time.sleep(2.0)
         
         new_count = len(result)
         log.info("MarketCSGO retry %d: +%d цен, итого %d/%d (%.0f%%)",
@@ -905,42 +995,110 @@ def _build_items(raw_items: list, excluded: set,
             if isinstance(bulk, dict):
                 avg = bulk.get("avg", 0)
                 price = bulk.get("price", 0)
-                # Приоритет: avg (недельная медиана), fallback на price (мин. листинг)
-                ref = avg if avg > 0 else price
+                # Консервативно: min(avg, price) чтобы не переоценивать упавшие предметы
+                if avg > 0 and price > 0:
+                    ref = min(avg, price)
+                elif avg > 0:
+                    ref = avg
+                elif price > 0:
+                    ref = price
+                else:
+                    ref = 0
                 if ref > 0:
                     ref_prices[c["name"]] = ref
     else:
-        # Фаза 2: получаем ref-цены MarketCSGO API (batch по 50)
+        # Фаза 2: двухступенчатая фильтрация чтобы не жечь ключ на тысячах запросов
+        # Шаг 2а: предварительная фильтрация по bulk ценам (без ключа)
         if progress_cb:
-            progress_cb(f"⏳ Получаю цены MarketCSGO ({len(candidates)} предметов)...")
+            progress_cb(f"⏳ Предфильтр по bulk ценам ({len(candidates)} предметов)...")
         
-        candidate_names = [c["name"] for c in candidates]
-        ref_prices = _get_mcsgo_ref_prices(candidate_names)
+        FULL_API_LIMIT = 2000  # макс предметов для детальной проверки через get-list-items-info
         
-        # Проверка ошибки API ключа
-        if isinstance(ref_prices, dict) and "error" in ref_prices:
-            return ref_prices  # вернём ошибку наверх
+        pre_filtered = []
+        for c in candidates:
+            bulk = _mcsgo_bulk_prices_cache.get(c["name"], {})
+            if isinstance(bulk, dict):
+                avg = bulk.get("avg", 0)
+                price = bulk.get("price", 0)
+                # Консервативно: min(avg, price) — не переоцениваем упавшие предметы
+                if avg > 0 and price > 0:
+                    ref = min(avg, price)
+                elif avg > 0:
+                    ref = avg
+                elif price > 0:
+                    ref = price
+                else:
+                    ref = 0
+            else:
+                ref = float(bulk) if bulk else 0
+            if ref <= 0:
+                continue
+            # Грубая проверка маржи по bulk цене
+            net_bulk = ref * (1 - MARKET_FEE)
+            max_discount_pre = 1 - (discount / 100) if discount > 0 else 1
+            buy_pre = round(c["buy_order"] * max_discount_pre, 2)
+            margin_bulk = ((net_bulk - buy_pre) / buy_pre * 100) if buy_pre > 0 else 0
+            # Берём кандидатов с запасом (margin >= min_profit - 5%) для детальной проверки
+            if margin_bulk >= max(0, (min_profit or 0) - 5):
+                pre_filtered.append((c, margin_bulk))
+        
+        # Сортируем по предварительной марже и берём топ FULL_API_LIMIT
+        pre_filtered.sort(key=lambda x: x[1], reverse=True)
+        top_candidates = [c for c, _ in pre_filtered[:FULL_API_LIMIT]]
+        
+        log.info("🔍 Полный режим: %d кандидатов → %d после предфильтра (лимит %d для API)",
+                 len(candidates), len(top_candidates), FULL_API_LIMIT)
+        
+        if progress_cb:
+            progress_cb(f"⏳ Детальные цены MarketCSGO ({len(top_candidates)} предметов)...")
+        
+        if top_candidates:
+            candidate_names = [c["name"] for c in top_candidates]
+            ref_prices = _get_mcsgo_ref_prices(candidate_names)
+            # Проверка ошибки API ключа
+            if isinstance(ref_prices, dict) and "error" in ref_prices:
+                return ref_prices  # вернём ошибку наверх
+        else:
+            ref_prices = {}
+
+        missing_count = len([c for c in top_candidates if c["name"] not in ref_prices])
+        log.info("🔄 Цен из API: %d/%d (без истории MCSGO: %d — пропускаем)",
+                 len(ref_prices), len(top_candidates), missing_count)
+        # Заменяем candidates на отфильтрованный список
+        candidates = top_candidates
     
     # Фаза 3: финальный расчёт маржи от ref-цен (с учётом скидки)
-    discount_mult = 1 - (discount / 100) if discount > 0 else 1
+    max_discount_mult = 1 - (discount / 100) if discount > 0 else 1
     if discount > 0:
-        log.info("📉 Скидка к buy order: %.0f%% (×%.2f)", discount, discount_mult)
+        log.info("📉 Макс. скидка к buy order: %.0f%% (нижняя граница ×%.2f)", discount, max_discount_mult)
     if min_profit > 0:
         log.info("📈 Фильтр мін. прибыли: %.0f%%", min_profit)
-    
+
     results = []
     for c in candidates:
         name = c["name"]
-        buy_price = round(c["buy_order"] * discount_mult, 2)
-        
         ref_price = ref_prices.get(name)
         if not ref_price or ref_price <= 0:
             stats["no_ref_price"] += 1
             continue
-        
+
         net = ref_price * (1 - MARKET_FEE)
+        min_buy_price = round(c["buy_order"] * max_discount_mult, 2)  # нижняя граница цены
+
+        # Ищем минимальную скидку (= максимальную цену ордера) при которой margin >= min_profit
+        # net = buy_price * (1 + min_profit/100) => buy_price = net / (1 + min_profit/100)
+        if min_profit > 0:
+            max_buy_price_for_profit = net / (1 + min_profit / 100)
+        else:
+            max_buy_price_for_profit = c["buy_order"]  # без ограничения — ставим по рынку
+
+        # buy_price = минимум из: текущий buy_order (не выше рынка) и max для профита
+        # но не ниже нижней границы (max discount)
+        optimal_buy = round(min(c["buy_order"], max_buy_price_for_profit), 2)
+        buy_price = max(optimal_buy, min_buy_price)
+
         margin = ((net - buy_price) / buy_price * 100) if buy_price > 0 else 0
-        if margin < min_profit or margin > 50:
+        if margin < min_profit or margin > 25:
             stats["no_margin"] += 1
             continue
 
@@ -1142,7 +1300,11 @@ async def start_buyorders(update: Update,
     if not keys_info or vresult["alive"] == 0:
         removed_text = ""
         if vresult["removed"] > 0:
+            removed_lines = "\n".join(
+                f"  • <code>{_mask_key(k)}</code>" for k in vresult.get("removed_keys", []))
             removed_text = f"\n🗑 Удалено мёртвых: {vresult['removed']}"
+            if removed_lines:
+                removed_text += f"\n{removed_lines}"
         await checking_msg.edit_text(
             f"🔑 <b>Нет активных ключей MarketCSGO</b> ❌{removed_text}\n\n"
             f"Отправь новый API ключ (USD):",
@@ -1155,7 +1317,11 @@ async def start_buyorders(update: Update,
     else:
         key_status = f"🔑 Активных ключей: {vresult['alive']}"
     if vresult["removed"] > 0:
+        removed_lines = "\n".join(
+            f"  • <code>{_mask_key(k)}</code>" for k in vresult.get("removed_keys", []))
         key_status += f"\n🗑 Удалено мёртвых: {vresult['removed']}"
+        if removed_lines:
+            key_status += f"\n{removed_lines}"
 
     last = _load_last_settings()
     kb = []
